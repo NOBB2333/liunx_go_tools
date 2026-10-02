@@ -1,6 +1,6 @@
 # golangtools
 
-`golangtools` 是一个模块化的跨平台系统工具集。文件系统模块使用原生目录读取、追加式二进制快照和本地只读 Web 服务，可以处理百万级目录树，而不生成巨型 CSV 或单文件 HTML。
+`golangtools` 是一个模块化的跨平台系统工具集。文件系统模块使用原生目录读取、单文件 GTI 快照和本地只读 Web 服务，可以处理百万级目录树，而不生成巨型 CSV 或单文件 HTML。
 
 ## 直接构建
 
@@ -42,7 +42,7 @@ golangtools-windows-arm64.exe
   -path /System/Volumes/Data
 ```
 
-扫描并自动生成查询索引：
+扫描并生成可立即浏览的快速树索引：
 
 ```bash
 ./dist/golangtools-darwin-arm64 filesystem scan \
@@ -57,30 +57,36 @@ Windows 默认使用 `-backend auto`：本地 NTFS 优先走 MFT 顺序读取，
 
 默认 worker 数经过平台限制：macOS 最多 64，其他平台最多 32。机械盘随机寻道成本较高，可以显式测试 `-workers 2`、`4`、`8`；SSD/APFS 通常适合更高并发。
 
-扫描热路径只写 `files.seg`、`directories.seg` 和 `errors.ndjson`。扫描完成后才批量生成带扩展名统计和 FTS5 trigram 文件名索引的 `query.db`。终端会持续打印阶段、实时吞吐、条目数量、错误数量和耗时；默认每 2 秒刷新，可用 `-progress-interval 5s` 调整。首次扫描没有可靠的总条目数，因此不会显示虚假百分比；索引阶段有百分比。
-
-```bash
-./dist/golangtools-darwin-arm64 filesystem index \
-  -snapshot /tmp/filesystem-snapshot
-```
+扫描内部使用顺序临时记录，完成后发布一个 `snapshot.gti`。segment、`tree.*` 和 SQLite 都不会作为输出保留。终端会持续打印阶段、实时吞吐、条目数量、错误数量和耗时；默认每 2 秒刷新，可用 `-progress-interval 5s` 调整。搜索在服务端按记录分块扫描，不再生成巨大的搜索副本。
 
 启动图形化查看器：
 
 ```bash
 ./dist/golangtools-darwin-arm64 filesystem serve \
-  -snapshot /tmp/filesystem-snapshot \
+  -snapshot /tmp/filesystem-snapshot/snapshot.gti \
   -listen 127.0.0.1:8080
 ```
 
 打开 `http://127.0.0.1:8080/`。浏览器只分页读取当前目录和搜索结果，不加载完整目录树。
 
-扫描会生成两类日志：工具级日志在 `~/.golangtools/logs/`（可用 `GOLANGTOOLS_LOG_DIR` 覆盖），文件系统快照内还有 `<snapshot>/run.log`。快照页面显示绝对路径、实际占用、逻辑大小、修改/创建/元数据变更时间，并提供复制路径和在本机文件管理器中打开的按钮。通过 `127.0.0.1` 使用时由 Go 后端调用系统文件管理器，不需要浏览器逐个目录授权。
+快照是可复制的离线结果。迁移时只需要复制 `snapshot.gti`，再使用目标电脑对应的可执行文件运行：
+
+```bash
+./golangtools-linux-amd64 filesystem serve \
+  -snapshot /path/to/snapshot.gti \
+  -path-root /new/location/of/source \
+  -listen 127.0.0.1:8080
+```
+
+展示、空间统计、目录分页和路径文本不需要原始磁盘在线；如果原始目录在目标机被复制到了不同位置，使用 `-path-root` 做根路径映射即可让“打开本机文件管理器”使用新路径。快照不会把文件内容复制过去，也不会改变另一台电脑的文件权限。
+
+扫描会生成两类日志：工具级日志在 `~/.golangtools/logs/`（可用 `GOLANGTOOLS_LOG_DIR` 覆盖），输出目录内还有 `run.log`。快照页面显示绝对路径、实际占用、逻辑大小、修改/创建/元数据变更时间，并提供复制路径和在本机文件管理器中打开的按钮。通过 `127.0.0.1` 使用时由 Go 后端调用系统文件管理器，不需要浏览器逐个目录授权。
 
 局域网监听会自动生成访问 token，并输出可直接打开的 URL：
 
 ```bash
 ./dist/golangtools-darwin-arm64 filesystem serve \
-  -snapshot /tmp/filesystem-snapshot \
+  -snapshot /tmp/filesystem-snapshot/snapshot.gti \
   -listen 0.0.0.0:8080
 ```
 

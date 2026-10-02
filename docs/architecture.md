@@ -1,48 +1,50 @@
-# 架构
+# 架构说明
 
-项目采用“薄 CLI + 独立功能模块”结构。根 `main.go` 只启动 CLI，功能实现不互相引用 CLI。
-
-```text
-main.go
-  -> internal/cli
-       -> internal/archive
-       -> internal/cleanup
-       -> internal/document
-       -> internal/filestore
-       -> internal/filesystem
-       -> internal/healthserver
-       -> internal/mockdata
-       -> internal/networkscan
-       -> internal/process
-
-web/
-  -> Vite production build
-  -> internal/filesystem/web
-  -> Go embed
-```
-
-每个目录是一项功能模块，包含自己的实现和测试。Go 文件统一使用小写 ASCII 文件名；中文保留在界面、帮助和文档中。
-
-## 文件系统数据流
+## 文件系统模块
 
 ```mermaid
 flowchart LR
-    A[目录树或 NTFS 卷] --> B[平台扫描后端]
-    B --> C[版本化 segment]
-    C --> D[批量索引构建器]
-    D --> E[SQLite query.db]
-    E --> F[只读 HTTP API]
-    F --> G[Vue 按需分页]
+  A[原始目录] --> B[平台扫描器]
+  B --> C[临时顺序记录]
+  C --> D[固定宽度树构建]
+  D --> E[单文件 snapshot.gti]
+  E --> F[Go 只读 HTTP 服务]
+  F --> G[Vue TypeScript 查看器]
 ```
 
-扫描与查询分为两个阶段。扫描热路径不执行 SQL，也不拼接完整路径到每条记录；文件只保存父目录数字 ID 和名称。查询库可以随时从 segment 重建。
+扫描和展示是两个独立生命周期。扫描过程结束后只发布 `snapshot.gti`；服务端只读该文件，扫描进程退出也不会影响查看。
 
-Linux 扫描器使用目录 fd、`getdents64` 和相对目录的 `statx`。macOS 使用有界并发 `readdir`；目录任务通过 dispatcher 排队，避免宽目录下 worker 相互阻塞。Windows 的 `auto` 后端优先读取本地 NTFS 卷的 `$MFT` 数据流，以大块顺序 I/O 解析 fixup、runlist、`$STANDARD_INFORMATION`、`$FILE_NAME` 和未命名 `$DATA`；无卷读取权限或不是 NTFS 时回退到 `FindFirstFileW/FindNextFileW` 原生枚举。两个 Windows 后端输出相同的 segment 合约。
+## 扫描后端
 
-HTTP 服务以只读模式打开 SQLite。默认只监听 `127.0.0.1`；非回环监听自动启用 token，首次 URL token 会交换为 HttpOnly Cookie。
+- macOS 使用有界并发 `readdir` 和平台元数据读取。
+- Linux 使用相对目录枚举和 `statx` 能力。
+- Windows NTFS `auto` 优先使用 `$MFT` 顺序读取；没有卷读取权限或不是 NTFS 时回退到 Win32 枚举。
+- 后端输出统一进入内部记录管道，最终格式与平台无关。
 
-所有 CLI 模块共用 `internal/runtime` 的结构化日志器。日志事件带有 `run_id`、模块、命令、阶段、事件、耗时和结构化字段；文件系统扫描通过附加日志把同一运行过程写入快照目录。新增模块只需要接入 CLI 路由即可获得统一日志格式。
+内部 segment 只用于扫描期间的顺序写入和最终归并，发布 GTI 后立即删除。它们不是公共 API，也不是迁移格式。
+
+## GTI 读取路径
+
+GTI 使用段表定位固定记录。目录分页流程是：
+
+1. 按外部目录 ID 查询内部目录索引。
+2. 读取目录的 child range。
+3. 批量 `ReadAt` 子节点 ID。
+4. 读取对应固定记录和名称池。
+5. 在内存中排序并分页。
+
+该路径不执行 SQL，不构建 B-tree，不加载整个目录树，也不生成完整路径副本。文件名搜索只扫描文件记录并响应取消信号。
+
+## Web 服务
+
+Go 提供只读分页 API，并嵌入 Vue、TypeScript、Vue Router 和 Tailwind 生产资源。浏览器不会直接读取 GTI，也不会获得完整快照文件。
+
+`POST /api/v1/snapshots/active/open` 仅允许回环请求，由 Go 后端调用 Finder、Explorer 或 `xdg-open`。远程查看可以浏览快照，但不能控制主机文件管理器。
+
+## 数据边界
+
+GTI 保存扫描时的元数据和路径组成信息，不保存文件内容。迁移 GTI 不会把原始文件复制到目标机器；`-path-root` 只改变查看和本机打开时的路径映射。
 
 ## 扩展规则
 
-新增功能时创建 `internal/<module>`，并只在 `internal/cli` 增加命令适配。模块不能依赖根 `main` 或前端源码。面向用户的结构化输出优先使用 JSON、NDJSON、SQLite 或带版本头的二进制格式。
+新的文件系统能力应放在 `internal/filesystem`，CLI 只负责参数解析和生命周期日志。新增字段必须更新 GTI 版本或明确向后兼容规则，不能通过再添加 SQLite 或散落 sidecar 文件解决。

@@ -2,9 +2,9 @@ package filesystem
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/subtle"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,28 +16,24 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
-
-	_ "github.com/glebarez/go-sqlite"
 )
 
 type ServerOptions struct {
 	SnapshotDir string
+	PathRoot    string
 	Token       string
 	OpenPath    func(path string, isDir bool) error
 }
 
 type Server struct {
-	snapshotDir string
-	manifest    SnapshotManifest
-	db          *sql.DB
-	token       string
-	static      http.Handler
-	hasSearch   bool
-	hasTimes    bool
-	hasExtAlloc bool
-	hasDirAlloc bool
-	openPath    func(path string, isDir bool) error
+	snapshotDir  string
+	snapshotFile string
+	pathRoot     string
+	manifest     SnapshotManifest
+	fast         *fastIndex
+	token        string
+	static       http.Handler
+	openPath     func(path string, isDir bool) error
 }
 
 type listItem struct {
@@ -60,72 +56,52 @@ func OpenServer(opt ServerOptions) (*Server, error) {
 	if strings.TrimSpace(opt.SnapshotDir) == "" {
 		return nil, errors.New("snapshot directory is required")
 	}
-	snapshotDir, err := filepath.Abs(filepath.Clean(opt.SnapshotDir))
+	snapshotInput, err := filepath.Abs(filepath.Clean(opt.SnapshotDir))
 	if err != nil {
 		return nil, err
 	}
-	manifest, err := readManifest(snapshotDir)
+	snapshotDir := snapshotInput
+	snapshotFile := gtiPath(snapshotInput)
+	if strings.HasSuffix(strings.ToLower(snapshotInput), ".gti") {
+		snapshotDir = filepath.Dir(snapshotInput)
+		snapshotFile = snapshotInput
+	}
+	manifest, err := readManifest(snapshotInput)
 	if err != nil {
 		return nil, err
 	}
-	databasePath := filepath.Join(snapshotDir, "query.db")
-	if _, err := os.Stat(databasePath); err != nil {
-		return nil, fmt.Errorf("query.db: %w; run filesystem index first", err)
-	}
-	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(databasePath)+"?mode=ro")
-	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(8)
-	db.SetMaxIdleConns(8)
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	var hasSearch int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'file_search'`).Scan(&hasSearch); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	fileColumns, err := tableColumns(db, "files")
-	if err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	extensionColumns, err := tableColumns(db, "extension_stats")
-	if err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	directoryColumns, err := tableColumns(db, "directories")
-	if err != nil {
-		_ = db.Close()
-		return nil, err
+	fast, fastErr := openFastIndex(snapshotFile)
+	if fastErr != nil || fast == nil || fast.container == nil {
+		if fast != nil {
+			_ = fast.Close()
+		}
+		return nil, fmt.Errorf("snapshot.gti unavailable (%v); run filesystem scan first", fastErr)
 	}
 	static, err := embeddedStaticHandler()
 	if err != nil {
-		_ = db.Close()
+		_ = fast.Close()
 		return nil, err
 	}
 	return &Server{
-		snapshotDir: snapshotDir,
-		manifest:    manifest,
-		db:          db,
-		token:       opt.Token,
-		static:      static,
-		hasSearch:   hasSearch == 1,
-		hasTimes:    fileColumns["ctime_ns"] && fileColumns["birthtime_ns"],
-		hasExtAlloc: extensionColumns["allocated_bytes"],
-		hasDirAlloc: directoryColumns["allocated_bytes"],
-		openPath:    opt.OpenPath,
+		snapshotDir:  snapshotDir,
+		snapshotFile: snapshotFile,
+		pathRoot:     strings.TrimSpace(opt.PathRoot),
+		manifest:     manifest,
+		fast:         fast,
+		token:        opt.Token,
+		static:       static,
+		openPath:     opt.OpenPath,
 	}, nil
 }
 
 func (s *Server) Close() error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil
 	}
-	return s.db.Close()
+	if s.fast != nil {
+		return s.fast.Close()
+	}
+	return nil
 }
 
 func (s *Server) Handler() http.Handler { return s }
@@ -248,38 +224,41 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_open_request", "a valid indexed item is required")
 		return
 	}
-	item := listItem{ID: request.ID, IsDir: request.IsDir}
-	if request.IsDir {
-		if err := s.db.QueryRowContext(r.Context(), `SELECT id,parent_id,name,1 FROM directories WHERE id = ?`, request.ID).Scan(&item.ID, &item.ParentID, &item.Name, new(int)); err != nil {
-			writeError(w, http.StatusNotFound, "item_not_found", "directory is not indexed")
+	if s.fast != nil {
+		item, ok := s.fast.indexForItem(request.ID, request.IsDir)
+		if !ok {
+			writeError(w, http.StatusNotFound, "item_not_found", "item is not indexed")
 			return
 		}
-	} else {
-		if err := s.db.QueryRowContext(r.Context(), `SELECT id,parent_id,name,0 FROM files WHERE id = ?`, request.ID).Scan(&item.ID, &item.ParentID, &item.Name, new(int)); err != nil {
-			writeError(w, http.StatusNotFound, "item_not_found", "file is not indexed")
+		indexed, err := s.fast.nodeItem(item)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "tree_read_failed", err.Error())
 			return
 		}
-	}
-	items := []listItem{item}
-	if err := s.decoratePaths(r.Context(), items); err != nil {
-		writeError(w, http.StatusInternalServerError, "path_query_failed", err.Error())
+		if indexed.IsDir != request.IsDir {
+			writeError(w, http.StatusNotFound, "item_not_found", "item type does not match")
+			return
+		}
+		if err := s.fast.decoratePath(&indexed, s.pathRootValue()); err != nil {
+			writeError(w, http.StatusInternalServerError, "path_query_failed", err.Error())
+			return
+		}
+		if _, err := os.Stat(indexed.Path); err != nil {
+			writeError(w, http.StatusNotFound, "path_not_found", fmt.Sprintf("path is no longer available: %s", indexed.Path))
+			return
+		}
+		opener := s.openPath
+		if opener == nil {
+			opener = openInFileManager
+		}
+		if err := opener(indexed.Path, request.IsDir); err != nil {
+			writeError(w, http.StatusBadGateway, "open_failed", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"path": indexed.Path, "is_dir": request.IsDir}, "meta": map[string]any{}})
 		return
 	}
-	item = items[0]
-	path := item.Path
-	if _, err := os.Stat(path); err != nil {
-		writeError(w, http.StatusNotFound, "path_not_found", fmt.Sprintf("path is no longer available: %s", path))
-		return
-	}
-	opener := s.openPath
-	if opener == nil {
-		opener = openInFileManager
-	}
-	if err := opener(path, request.IsDir); err != nil {
-		writeError(w, http.StatusBadGateway, "open_failed", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"path": path, "is_dir": request.IsDir}, "meta": map[string]any{}})
+	writeError(w, http.StatusNotFound, "item_not_found", "snapshot.gti is not available")
 }
 
 func isLoopbackRequest(r *http.Request) bool {
@@ -296,7 +275,10 @@ func (s *Server) handleSummary(w http.ResponseWriter) {
 		"manifest":            s.manifest,
 		"indexed_files":       s.manifest.Files,
 		"indexed_directories": s.manifest.Directories + 1,
-		"query_database":      filepath.Join(s.snapshotDir, "query.db"),
+		"snapshot_file":       s.snapshotFile,
+	}
+	if s.pathRoot != "" {
+		data["path_root"] = s.pathRoot
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": data, "meta": map[string]any{}})
 }
@@ -312,48 +294,20 @@ func (s *Server) handleDirectory(w http.ResponseWriter, r *http.Request, path st
 		writeError(w, http.StatusBadRequest, "invalid_directory", "directory id is invalid")
 		return
 	}
-	type directoryInfo struct {
-		ID       int64  `json:"id"`
-		ParentID int64  `json:"parent_id"`
-		Name     string `json:"name"`
-		Depth    int64  `json:"depth"`
-		Path     string `json:"path"`
-	}
-	rows, err := s.db.QueryContext(r.Context(), `WITH RECURSIVE ancestors(id,parent_id,name,depth) AS (
-		SELECT id,parent_id,name,depth FROM directories WHERE id = ?
-		UNION ALL
-		SELECT d.id,d.parent_id,d.name,d.depth FROM directories d JOIN ancestors a ON d.id = a.parent_id
-	) SELECT id,parent_id,name,depth FROM ancestors ORDER BY depth ASC`, directoryID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "query_failed", err.Error())
-		return
-	}
-	defer rows.Close()
-	breadcrumbs := make([]directoryInfo, 0, 8)
-	for rows.Next() {
-		var item directoryInfo
-		if err := rows.Scan(&item.ID, &item.ParentID, &item.Name, &item.Depth); err != nil {
-			writeError(w, http.StatusInternalServerError, "query_failed", err.Error())
+	if s.fast != nil {
+		breadcrumbs, err := s.fast.breadcrumbs(uint64(directoryID), s.pathRootValue())
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				writeError(w, http.StatusNotFound, "directory_not_found", "directory does not exist")
+			} else {
+				writeError(w, http.StatusInternalServerError, "tree_read_failed", err.Error())
+			}
 			return
 		}
-		breadcrumbs = append(breadcrumbs, item)
-	}
-	if err := rows.Err(); err != nil {
-		writeError(w, http.StatusInternalServerError, "query_failed", err.Error())
+		writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"directory": breadcrumbs[len(breadcrumbs)-1], "breadcrumbs": breadcrumbs}, "meta": map[string]any{}})
 		return
 	}
-	if len(breadcrumbs) == 0 {
-		writeError(w, http.StatusNotFound, "directory_not_found", "directory does not exist")
-		return
-	}
-	for i := range breadcrumbs {
-		names := make([]string, i+1)
-		for j := range names {
-			names[j] = breadcrumbs[j].Name
-		}
-		breadcrumbs[i].Path = s.pathForNames(names)
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"directory": breadcrumbs[len(breadcrumbs)-1], "breadcrumbs": breadcrumbs}, "meta": map[string]any{}})
+	writeError(w, http.StatusNotFound, "directory_not_found", "snapshot.gti is not available")
 }
 
 func (s *Server) handleChildren(w http.ResponseWriter, r *http.Request, path string) {
@@ -369,71 +323,42 @@ func (s *Server) handleChildren(w http.ResponseWriter, r *http.Request, path str
 	}
 	limit, offset := pagination(r)
 	sortValue := r.URL.Query().Get("sort")
-	sortSQL := safeSort(sortValue)
-	if !s.manifest.AllocatedKnown && sortValue != "name" && sortValue != "mtime" {
-		sortSQL = "size_bytes DESC, is_dir DESC, id ASC"
-	}
-	directoryAllocated := "0"
-	if s.hasDirAlloc {
-		directoryAllocated = "allocated_bytes"
-	}
-	query := fmt.Sprintf(`SELECT id,parent_id,name,is_dir,size_bytes,allocated_bytes,file_count,dir_count,mtime_ns,ctime_ns,birthtime_ns,extension FROM (
-		SELECT id,parent_id,name,1 AS is_dir,logical_bytes AS size_bytes,%s AS allocated_bytes,file_count,directory_count AS dir_count,0 AS mtime_ns,0 AS ctime_ns,0 AS birthtime_ns,'' AS extension FROM directories WHERE parent_id = ?
-		UNION ALL
-		SELECT id,parent_id,name,0 AS is_dir,size AS size_bytes,blocks * 512 AS allocated_bytes,0,0,mtime_ns,%s,%s,extension FROM files WHERE parent_id = ?
-	) ORDER BY %s LIMIT ? OFFSET ?`, directoryAllocated, s.fileTimeExpr("ctime_ns"), s.fileTimeExpr("birthtime_ns"), sortSQL)
-	rows, err := s.db.QueryContext(r.Context(), query, parentID, parentID, limit, offset)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "query_failed", err.Error())
+	if s.fast != nil {
+		items, total, err := s.fast.childrenItems(uint64(parentID), sortValue, limit, offset, s.manifest.AllocatedKnown)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				writeError(w, http.StatusNotFound, "directory_not_found", "directory does not exist")
+			} else {
+				writeError(w, http.StatusInternalServerError, "tree_read_failed", err.Error())
+			}
+			return
+		}
+		if err := s.decorateFastPaths(items); err != nil {
+			writeError(w, http.StatusInternalServerError, "path_query_failed", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": items, "meta": map[string]any{"total": total, "limit": limit, "offset": offset, "parent_id": parentID, "engine": "tree"}})
 		return
 	}
-	defer rows.Close()
-	items, err := scanItems(rows)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "query_failed", err.Error())
-		return
-	}
-	if err := s.decoratePaths(r.Context(), items); err != nil {
-		writeError(w, http.StatusInternalServerError, "path_query_failed", err.Error())
-		return
-	}
-	var total int64
-	if err := s.db.QueryRowContext(r.Context(), `SELECT (SELECT COUNT(*) FROM directories WHERE parent_id = ?) + (SELECT COUNT(*) FROM files WHERE parent_id = ?)`, parentID, parentID).Scan(&total); err != nil {
-		writeError(w, http.StatusInternalServerError, "query_failed", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": items, "meta": map[string]any{"total": total, "limit": limit, "offset": offset, "parent_id": parentID}})
+	writeError(w, http.StatusInternalServerError, "snapshot_unavailable", "snapshot.gti is not available")
 }
 
 func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
-	limit, offset := pagination(r)
-	order := "blocks DESC, id ASC"
-	if !s.manifest.AllocatedKnown {
-		order = "size DESC, id ASC"
-	}
-	switch r.URL.Query().Get("sort") {
-	case "name":
-		order = "name COLLATE NOCASE ASC, id ASC"
-	case "mtime":
-		order = "mtime_ns DESC, id ASC"
-	}
-	query := fmt.Sprintf(`SELECT id,parent_id,name,0,size,blocks * 512 AS allocated_bytes,0,0,mtime_ns,%s,%s,extension FROM files ORDER BY %s LIMIT ? OFFSET ?`, s.fileTimeExpr("ctime_ns"), s.fileTimeExpr("birthtime_ns"), order)
-	rows, err := s.db.QueryContext(r.Context(), query, limit, offset)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "query_failed", err.Error())
+	if s.fast != nil {
+		limit, offset := pagination(r)
+		items, err := s.fast.fileItems(r.Context(), r.URL.Query().Get("sort"), limit, offset, s.manifest.AllocatedKnown)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "tree_read_failed", err.Error())
+			return
+		}
+		if err := s.decorateFastPaths(items); err != nil {
+			writeError(w, http.StatusInternalServerError, "path_query_failed", err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": items, "meta": map[string]any{"limit": limit, "offset": offset, "engine": "tree"}})
 		return
 	}
-	defer rows.Close()
-	items, err := scanItems(rows)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "query_failed", err.Error())
-		return
-	}
-	if err := s.decoratePaths(r.Context(), items); err != nil {
-		writeError(w, http.StatusInternalServerError, "path_query_failed", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": items, "meta": map[string]any{"limit": limit, "offset": offset}})
+	writeError(w, http.StatusInternalServerError, "snapshot_unavailable", "snapshot.gti is not available")
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
@@ -442,45 +367,21 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"data": []listItem{}, "meta": map[string]any{"total": 0}})
 		return
 	}
-	limit, offset := pagination(r)
-	var (
-		rows   *sql.Rows
-		err    error
-		engine = "scan"
-	)
-	if s.hasSearch && utf8.RuneCountInString(term) >= 3 {
-		engine = "trigram"
-		phrase := `"` + strings.ReplaceAll(term, `"`, `""`) + `"`
-		order := "f.blocks * 512 DESC"
-		if !s.manifest.AllocatedKnown {
-			order = "f.size DESC"
+	if s.fast != nil {
+		limit, offset := pagination(r)
+		items, total, err := s.fast.search(r.Context(), term, limit, offset, s.manifest.AllocatedKnown)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "tree_search_failed", err.Error())
+			return
 		}
-		rows, err = s.db.QueryContext(r.Context(), fmt.Sprintf(`SELECT f.id,f.parent_id,f.name,0,f.size,f.blocks * 512,0,0,f.mtime_ns,%s,%s,f.extension
-			FROM file_search JOIN files f ON f.id = file_search.rowid
-			WHERE file_search MATCH ? ORDER BY %s LIMIT ? OFFSET ?`, s.fileTimeExpr("f.ctime_ns"), s.fileTimeExpr("f.birthtime_ns"), order), phrase, limit, offset)
-	} else {
-		pattern := "%" + term + "%"
-		order := "blocks * 512 DESC"
-		if !s.manifest.AllocatedKnown {
-			order = "size DESC"
+		if err := s.decorateFastPaths(items); err != nil {
+			writeError(w, http.StatusInternalServerError, "path_query_failed", err.Error())
+			return
 		}
-		rows, err = s.db.QueryContext(r.Context(), fmt.Sprintf(`SELECT id,parent_id,name,0,size,blocks * 512,0,0,mtime_ns,%s,%s,extension FROM files WHERE name LIKE ? COLLATE NOCASE ORDER BY %s LIMIT ? OFFSET ?`, s.fileTimeExpr("ctime_ns"), s.fileTimeExpr("birthtime_ns"), order), pattern, limit, offset)
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "query_failed", err.Error())
+		writeJSON(w, http.StatusOK, map[string]any{"data": items, "meta": map[string]any{"limit": limit, "offset": offset, "total": total, "query": term, "engine": "tree-scan"}})
 		return
 	}
-	defer rows.Close()
-	items, err := scanItems(rows)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "query_failed", err.Error())
-		return
-	}
-	if err := s.decoratePaths(r.Context(), items); err != nil {
-		writeError(w, http.StatusInternalServerError, "path_query_failed", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": items, "meta": map[string]any{"limit": limit, "offset": offset, "query": term, "engine": engine}})
+	writeError(w, http.StatusInternalServerError, "snapshot_unavailable", "snapshot.gti is not available")
 }
 
 func (s *Server) handleExtensions(w http.ResponseWriter, r *http.Request) {
@@ -490,57 +391,60 @@ func (s *Server) handleExtensions(w http.ResponseWriter, r *http.Request) {
 			limit = parsed
 		}
 	}
-	extensionQuery := `SELECT extension,files,bytes FROM extension_stats ORDER BY bytes DESC LIMIT ?`
-	withAllocated := false
-	if s.hasExtAlloc {
-		extensionQuery = `SELECT extension,files,bytes,allocated_bytes FROM extension_stats ORDER BY bytes DESC LIMIT ?`
-		withAllocated = true
-	} else {
-		// Old materialized tables did not store allocated bytes. Derive it from
-		// file blocks so the UI keeps the same physical-space semantics.
-		extensionQuery = `SELECT extension,COUNT(*),SUM(size),SUM(blocks * 512) FROM files WHERE extension <> '' GROUP BY extension ORDER BY SUM(size) DESC LIMIT ?`
-		withAllocated = true
-	}
-	rows, err := s.db.QueryContext(r.Context(), extensionQuery, limit)
-	if err != nil && strings.Contains(strings.ToLower(err.Error()), "no such table") {
-		// Snapshots built before the materialized extension table remain readable.
-		rows, err = s.db.QueryContext(r.Context(), `SELECT extension,COUNT(*),SUM(size),SUM(blocks * 512) FROM files WHERE extension <> '' GROUP BY extension ORDER BY SUM(size) DESC LIMIT ?`, limit)
-		withAllocated = true
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "query_failed", err.Error())
+	if s.fast != nil {
+		result := make([]map[string]any, 0, limit)
+		for _, item := range s.fast.extensions {
+			if len(result) >= limit {
+				break
+			}
+			result = append(result, map[string]any{"extension": item.Extension, "files": item.Files, "size_bytes": item.SizeBytes, "allocated_bytes": item.AllocatedBytes})
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": result, "meta": map[string]any{"engine": "tree"}})
 		return
 	}
-	defer rows.Close()
-	type extensionStat struct {
-		Extension      string `json:"extension"`
-		Files          int64  `json:"files"`
-		SizeBytes      int64  `json:"size_bytes"`
-		AllocatedBytes int64  `json:"allocated_bytes"`
-	}
-	result := make([]extensionStat, 0, limit)
-	for rows.Next() {
-		var item extensionStat
-		var scanErr error
-		if withAllocated {
-			scanErr = rows.Scan(&item.Extension, &item.Files, &item.SizeBytes, &item.AllocatedBytes)
-		} else {
-			scanErr = rows.Scan(&item.Extension, &item.Files, &item.SizeBytes)
-		}
-		if scanErr != nil {
-			writeError(w, http.StatusInternalServerError, "query_failed", scanErr.Error())
-			return
-		}
-		result = append(result, item)
-	}
-	if err := rows.Err(); err != nil {
-		writeError(w, http.StatusInternalServerError, "query_failed", err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"data": result, "meta": map[string]any{}})
+	writeError(w, http.StatusInternalServerError, "snapshot_unavailable", "snapshot.gti is not available")
 }
 
 func (s *Server) handleErrors(w http.ResponseWriter, r *http.Request) {
+	if s.fast != nil && s.fast.container != nil {
+		data, err := s.fast.sectionBytes(gtiErrors)
+		if errors.Is(err, os.ErrNotExist) {
+			writeJSON(w, http.StatusOK, map[string]any{"data": []map[string]any{}, "meta": map[string]any{"limit": 100, "offset": 0}})
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "read_failed", err.Error())
+			return
+		}
+		limit, offset := pagination(r)
+		var result []map[string]any
+		scanner := bufio.NewScanner(bytes.NewReader(data))
+		scanner.Buffer(make([]byte, 64<<10), 4<<20)
+		lineNumber := 0
+		for scanner.Scan() {
+			if lineNumber < offset {
+				lineNumber++
+				continue
+			}
+			if len(result) >= limit {
+				break
+			}
+			var item map[string]any
+			if json.Unmarshal(scanner.Bytes(), &item) == nil {
+				result = append(result, item)
+			}
+			lineNumber++
+		}
+		if err := scanner.Err(); err != nil {
+			writeError(w, http.StatusInternalServerError, "read_failed", err.Error())
+			return
+		}
+		if result == nil {
+			result = []map[string]any{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": result, "meta": map[string]any{"limit": limit, "offset": offset}})
+		return
+	}
 	file, err := os.Open(filepath.Join(s.snapshotDir, "errors.ndjson"))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		writeError(w, http.StatusInternalServerError, "read_failed", err.Error())
@@ -580,127 +484,23 @@ func (s *Server) handleErrors(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"data": result, "meta": map[string]any{"limit": limit, "offset": offset}})
 }
 
-func scanItems(rows *sql.Rows) ([]listItem, error) {
-	items := make([]listItem, 0)
-	for rows.Next() {
-		var item listItem
-		var isDir int
-		if err := rows.Scan(&item.ID, &item.ParentID, &item.Name, &isDir, &item.SizeBytes, &item.AllocatedBytes, &item.FileCount, &item.DirCount, &item.MTimeNS, &item.CTimeNS, &item.BirthtimeNS, &item.Extension); err != nil {
-			return nil, err
-		}
-		item.IsDir = isDir != 0
-		items = append(items, item)
-	}
-	return items, rows.Err()
-}
-
-func tableColumns(db *sql.DB, table string) (map[string]bool, error) {
-	rows, err := db.Query(`PRAGMA table_info(` + table + `)`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	columns := make(map[string]bool)
-	for rows.Next() {
-		var cid int
-		var name, columnType string
-		var notNull, primaryKey int
-		var defaultValue any
-		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
-			return nil, err
-		}
-		columns[strings.ToLower(name)] = true
-	}
-	return columns, rows.Err()
-}
-
-func (s *Server) fileTimeExpr(column string) string {
-	if s.hasTimes {
-		return column
-	}
-	return "0"
-}
-
-func (s *Server) pathForNames(names []string) string {
-	result := s.manifest.Root
-	if result == "" {
-		result = string(filepath.Separator)
-	}
-	start := 0
-	rootName := filepath.Base(filepath.Clean(result))
-	if len(names) > 0 && rootName != "." && names[0] == rootName {
-		start = 1
-	}
-	for _, name := range names[start:] {
-		result = filepath.Join(result, name)
-	}
-	return result
-}
-
-func (s *Server) decoratePaths(ctx context.Context, items []listItem) error {
-	if len(items) == 0 {
+func (s *Server) decorateFastPaths(items []listItem) error {
+	if s.fast == nil {
 		return nil
-	}
-	ids := make([]int64, 0, len(items))
-	seen := make(map[int64]struct{}, len(items))
-	for _, item := range items {
-		id := item.ParentID
-		if item.IsDir {
-			id = item.ID
-		}
-		if id > 0 {
-			if _, ok := seen[id]; !ok {
-				seen[id] = struct{}{}
-				ids = append(ids, id)
-			}
-		}
-	}
-	if len(ids) == 0 {
-		return nil
-	}
-	placeholders := make([]string, len(ids))
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		placeholders[i] = "?"
-		args[i] = id
-	}
-	query := fmt.Sprintf(`WITH RECURSIVE ancestors(origin_id,id,parent_id,name,depth) AS (
-		SELECT id,id,parent_id,name,depth FROM directories WHERE id IN (%s)
-		UNION ALL
-		SELECT a.origin_id,d.id,d.parent_id,d.name,d.depth
-		FROM directories d JOIN ancestors a ON d.id = a.parent_id
-	) SELECT origin_id,name,depth FROM ancestors ORDER BY origin_id,depth ASC`, strings.Join(placeholders, ","))
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	namesByOrigin := make(map[int64][]string, len(ids))
-	for rows.Next() {
-		var origin int64
-		var name string
-		var depth int64
-		if err := rows.Scan(&origin, &name, &depth); err != nil {
-			return err
-		}
-		namesByOrigin[origin] = append(namesByOrigin[origin], name)
-	}
-	if err := rows.Err(); err != nil {
-		return err
 	}
 	for i := range items {
-		origin := items[i].ParentID
-		if items[i].IsDir {
-			origin = items[i].ID
-		}
-		base := s.pathForNames(namesByOrigin[origin])
-		if items[i].IsDir {
-			items[i].Path = base
-		} else {
-			items[i].Path = filepath.Join(base, items[i].Name)
+		if err := s.fast.decoratePath(&items[i], s.pathRootValue()); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func (s *Server) pathRootValue() string {
+	if s.pathRoot != "" {
+		return s.pathRoot
+	}
+	return s.manifest.Root
 }
 
 func pagination(r *http.Request) (int, int) {
@@ -720,17 +520,6 @@ func pagination(r *http.Request) (int, int) {
 		limit = 500
 	}
 	return limit, offset
-}
-
-func safeSort(value string) string {
-	switch value {
-	case "name":
-		return "name COLLATE NOCASE ASC, is_dir DESC, id ASC"
-	case "mtime":
-		return "mtime_ns DESC, id ASC"
-	default:
-		return "allocated_bytes DESC, is_dir DESC, id ASC"
-	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

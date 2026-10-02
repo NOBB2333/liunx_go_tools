@@ -1,77 +1,84 @@
 # 文件系统快照格式
 
-每个快照目录包含：
+文件系统扫描结果的唯一正式格式是 `snapshot.gti`。它是跨 Windows、macOS 和 Linux 的只读二进制容器，服务端可以直接通过 `ReadAt` 读取，不需要解压、不需要导入数据库，也不需要访问扫描时的原始磁盘。
+
+扫描目录通常还会保留一个 `run.log`，它是运行日志，不属于数据格式。最小迁移只复制 `snapshot.gti`。
+
+## 容器布局
+
+文件头包含 magic、格式版本、段数量和段表位置。段表记录每个数据段的偏移和长度。当前段包括：
+
+| 段 | 内容 |
+| --- | --- |
+| manifest | 扫描根路径、平台后端、计数、大小、时间、完成状态 |
+| directories | 固定宽度目录记录 |
+| files | 固定宽度文件记录 |
+| names | UTF-8 名称池 |
+| children | 连续的子节点 ID 数组 |
+| ranges | 每个目录的子节点起始位置和数量 |
+| dirids | 外部目录 ID 到内部索引的排序映射 |
+| extensions | 扩展名统计 |
+| errors | 扫描错误的 NDJSON 内容 |
+
+所有数值字段使用 Little Endian。段偏移是文件内绝对偏移，因此服务端可以直接对一个文件执行随机读取和 mmap 优化。
+
+## 固定记录
+
+目录记录为 56 字节：
 
 ```text
-manifest.json
-files.seg
-directories.seg
-errors.ndjson
-query.db
+id              uint64
+parent_index    uint32
+name_length     uint32
+name_offset     uint64
+logical_bytes   uint64
+allocated_bytes uint64
+file_count      uint64
+directory_count uint64
 ```
 
-## manifest.json
+文件记录为 56 字节：
 
-记录 schema 版本、根目录、扫描模式、扫描后端、worker 数、文件和目录数量、逻辑/分配字节数、错误数、起止时间、耗时和实际吞吐。
+```text
+parent_index    uint32
+name_length     uint32
+name_offset     uint64
+logical_bytes   uint64
+allocated_bytes uint64
+mtime_ns        int64
+ctime_ns        int64
+birthtime_ns    int64
+```
 
-当前 `schema_version` 为 `3`。目录数量不包含根目录；查询索引包含根目录。`scanner_backend` 记录最终使用的扫描器，`allocated_bytes_known` 表示实际分配字节是否有效，`allocation_source` 记录其来源。Windows 原生枚举无法在不逐文件打开句柄的前提下获得分配块，因此将 `allocated_bytes_known` 写为 `false`；此时 0 是未知值占位。稀疏文件、APFS clone 或硬链接可能让逻辑大小大于磁盘容量；只有分配字节已知时，空间分析才默认使用实际分配字节数。
+目录和文件的显示 ID 仍然由 API 暴露，但内部父子关系使用连续 `uint32` 索引。完整路径不重复保存，查询时沿父指针拼接名称。
 
-## segment
+## 为什么不用 Protobuf
 
-所有整数使用 Little Endian。新 segment 具有 16 字节文件头：
+Protobuf 适合 RPC 和消息交换，不适合作为本项目的主随机访问格式：
 
-| Offset | 长度 | 内容 |
-|---:|---:|---|
-| 0 | 8 | magic `GTSSEG01` |
-| 8 | 2 | segment 格式版本，当前为 `2` |
-| 10 | 2 | 类型：`1` 文件，`2` 目录 |
-| 12 | 4 | 保留 |
+- 每条重复 message 都有字段标签和长度前缀。
+- 数百万条记录不能直接按数组下标 mmap 定位。
+- 父子范围、名称池和固定列需要另外建立索引。
+- 最终仍然需要二次物化才能满足网页分页读取。
 
-`files.seg` 的每条新记录为 72 字节固定头加 UTF-8 名称。索引器仍能读取无头旧记录和 v1 记录：
+GTI 使用固定宽度记录、集中名称池和段表，读取路径更短，也避免了重复副本。
 
-| 字段 | 类型 |
-|---|---|
-| parent_id | uint64 |
-| inode | uint64 |
-| device | uint64 |
-| size | int64 |
-| blocks | int64 |
-| mtime_ns | int64 |
-| ctime_ns | int64 |
-| birthtime_ns | int64 |
-| mode | uint32 |
-| name_length | uint32 |
-| name | bytes |
+CLP、Logdy Pro 的列式压缩和字典编码思路适合日志字段查询，但日志时间序列和模板压缩不能直接替代目录树的父子索引。未来可以借鉴其分块压缩做传输包，但默认格式保持不压缩，以保证 mmap、随机读取和最快启动。
 
-`directories.seg` 的每条记录为 60 字节固定头加 UTF-8 名称：
+## 搜索
 
-| 字段 | 类型 |
-|---|---|
-| id | uint64 |
-| parent_id | uint64 |
-| depth | uint32 |
-| reserved | uint32 |
-| logical_bytes | uint64 |
-| allocated_bytes | uint64 |
-| file_count | uint64 |
-| directory_count | uint64 |
-| name_length | uint32 |
-| name | bytes |
+默认不生成 FTS、trigram 或 SQLite 搜索副本。任意文件名子串搜索由服务端分块扫描文件记录并分页返回。这样不会因为生成搜索索引而增加数百 MB 到数 GB 的重复数据，也不会阻塞目录树启动。
 
-索引器仍能读取版本化之前的无文件头 segment。
+## 原子发布与完整性
 
-## errors.ndjson
+扫描和发布使用临时文件：
 
-每行一条 JSON 错误记录，包含 `path` 和 `error`。HTTP API 流式分页读取该文件，不会一次加载完整日志。
+```text
+snapshot.gti.tmp -> fsync -> rename -> snapshot.gti
+```
 
-## query.db
+只有发布完成后才会删除内部临时 segment。中断的扫描不会得到 `complete=true` 的 GTI 文件。不要手工修改 GTI；需要更新数据时重新运行 `filesystem scan`。
 
-SQLite sidecar 当前 `user_version=4`，包含：
+## 版本策略
 
-- `metadata`：格式版本和扫描摘要
-- `directories`：目录层级和聚合大小
-- `files`：文件元数据，包括 mtime、ctime、birthtime 和分配块
-- `extension_stats`：索引阶段物化的扩展名统计，同时保存逻辑和实际分配字节
-- `file_search`：FTS5 trigram 文件名子串索引
-
-索引使用临时文件构建，完成后在 macOS/Linux 原子替换目标。新索引使用 trigram 倒排表处理任意位置的文件名关键词；旧版 `query.db` 会自动回退到兼容查询，旧数据缺少的时间字段显示为“不可用”。扫描过程不依赖 `query.db`，可以用 `filesystem index` 随时重建。
+当前 GTI 是新的破坏性格式。旧的 `files.seg`、`directories.seg`、`tree.*` 和 `query.db` 不再由服务读取，旧快照需要重新扫描。格式版本写入文件头，未来不兼容版本应明确报错，而不是静默解释错误数据。

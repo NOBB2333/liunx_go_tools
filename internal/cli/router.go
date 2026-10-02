@@ -88,7 +88,7 @@ func Run(args []string) error {
 
 func runFilesystem(args []string) error {
 	if len(args) == 0 {
-		return errors.New("filesystem subcommand is required: probe, scan, index, serve, or status")
+		return errors.New("filesystem subcommand is required: probe, scan, serve, or status")
 	}
 
 	switch args[0] {
@@ -114,8 +114,6 @@ func runFilesystem(args []string) error {
 		workers := fs.Int("workers", 0, "scanner worker count; 0 selects the platform default")
 		metadata := fs.String("metadata", "basic", "metadata mode: basic or tree")
 		backend := fs.String("backend", "auto", "scanner backend: auto, windows-mft, windows-native, or portable")
-		buildIndex := fs.Bool("build-index", true, "build query.db after scanning")
-		batchSize := fs.Int("batch-size", 10000, "SQLite index batch size")
 		progressInterval := fs.Duration("progress-interval", 2*time.Second, "progress report interval")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
@@ -161,77 +159,34 @@ func runFilesystem(args []string) error {
 		if err := printJSON(summary); err != nil {
 			return err
 		}
-		if *buildIndex {
-			built, err := filesystem.NewIndexBuilder().Build(ctx, filesystem.BuildOptions{
-				SnapshotDir: outputDir, BatchSize: *batchSize, ProgressInterval: *progressInterval,
-				Progress: func(progress filesystem.BuildProgress) {
-					if activeLogger == nil {
-						return
-					}
-					message := progress.Message
-					if progress.Indeterminate {
-						message = fmt.Sprintf("%s elapsed=%s", message, progress.Elapsed.Round(time.Second))
-					} else {
-						message = fmt.Sprintf("%s %d/%d %.1f%% elapsed=%s", message, progress.Current, progress.Total, progress.Percent, progress.Elapsed.Round(time.Second))
-					}
-					activeLogger.Progress(progress.Phase, message, map[string]any{
-						"current": progress.Current, "total": progress.Total, "percent": progress.Percent,
-						"elapsed_ns": progress.Elapsed.Nanoseconds(), "indeterminate": progress.Indeterminate,
-					})
-				},
-			})
-			if err != nil {
-				return err
-			}
-			fmt.Println("query index:")
-			if err := printJSON(built); err != nil {
-				return err
-			}
-		}
-		return nil
-
-	case "index":
-		fs := flag.NewFlagSet("filesystem index", flag.ContinueOnError)
-		snapshot := fs.String("snapshot", "", "snapshot directory")
-		database := fs.String("database", "", "query database path")
-		batchSize := fs.Int("batch-size", 10000, "SQLite index batch size")
-		progressInterval := fs.Duration("progress-interval", 2*time.Second, "progress report interval")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		if strings.TrimSpace(*snapshot) == "" {
-			return errors.New("-snapshot is required")
-		}
 		if activeLogger != nil {
-			activeLogger.Phase("config", "准备构建查询索引", map[string]any{"snapshot_dir": *snapshot, "database": *database})
+			activeLogger.Phase("tree", "生成单文件快速快照", map[string]any{"snapshot_dir": outputDir})
 		}
-		built, err := filesystem.NewIndexBuilder().Build(context.Background(), filesystem.BuildOptions{
-			SnapshotDir: *snapshot, DatabasePath: *database, BatchSize: *batchSize, ProgressInterval: *progressInterval,
-			Progress: func(progress filesystem.BuildProgress) {
-				if activeLogger == nil {
-					return
-				}
-				message := progress.Message
-				if progress.Indeterminate {
-					message = fmt.Sprintf("%s elapsed=%s", message, progress.Elapsed.Round(time.Second))
-				} else {
-					message = fmt.Sprintf("%s %d/%d %.1f%% elapsed=%s", message, progress.Current, progress.Total, progress.Percent, progress.Elapsed.Round(time.Second))
-				}
-				activeLogger.Progress(progress.Phase, message, map[string]any{
-					"current": progress.Current, "total": progress.Total, "percent": progress.Percent,
-					"elapsed_ns": progress.Elapsed.Nanoseconds(), "indeterminate": progress.Indeterminate,
-				})
-			},
-		})
-		if err != nil {
+		if err := filesystem.BuildFastIndex(ctx, outputDir, func(progress filesystem.FastIndexProgress) {
+			if activeLogger == nil {
+				return
+			}
+			percent := 0.0
+			if progress.Total > 0 {
+				percent = float64(progress.Current) * 100 / float64(progress.Total)
+			}
+			activeLogger.Progress(progress.Phase, fmt.Sprintf("%s %d/%d %.1f%%", progress.Message, progress.Current, progress.Total, percent), map[string]any{
+				"current": progress.Current, "total": progress.Total, "percent": percent,
+			})
+		}); err != nil {
 			return err
 		}
-		return printJSON(built)
+		if err := filesystem.PackFastSnapshot(outputDir); err != nil {
+			return err
+		}
+		fmt.Println("snapshot:", filepath.Join(outputDir, "snapshot.gti"))
+		return nil
 
 	case "serve":
 		fs := flag.NewFlagSet("filesystem serve", flag.ContinueOnError)
-		snapshot := fs.String("snapshot", "", "snapshot directory")
+		snapshot := fs.String("snapshot", "", "snapshot.gti file or containing directory")
 		listen := fs.String("listen", "127.0.0.1:8080", "HTTP listen address")
+		pathRoot := fs.String("path-root", "", "override the indexed root path when serving a copied snapshot")
 		token := fs.String("token", "", "bearer token; required for non-loopback listen addresses")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
@@ -248,7 +203,7 @@ func runFilesystem(args []string) error {
 			serveToken = generated
 			fmt.Println("generated token:", serveToken)
 		}
-		server, err := filesystem.OpenServer(filesystem.ServerOptions{SnapshotDir: *snapshot, Token: serveToken})
+		server, err := filesystem.OpenServer(filesystem.ServerOptions{SnapshotDir: *snapshot, PathRoot: *pathRoot, Token: serveToken})
 		if err != nil {
 			return err
 		}
@@ -264,7 +219,7 @@ func runFilesystem(args []string) error {
 
 	case "status":
 		fs := flag.NewFlagSet("filesystem status", flag.ContinueOnError)
-		snapshot := fs.String("snapshot", "", "snapshot directory")
+		snapshot := fs.String("snapshot", "", "snapshot.gti file or containing directory")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -275,9 +230,12 @@ func runFilesystem(args []string) error {
 		if err != nil {
 			return err
 		}
-		status := map[string]any{"manifest": manifest, "query_index": false}
-		if _, err := os.Stat(filepath.Join(*snapshot, "query.db")); err == nil {
-			status["query_index"] = true
+		status := map[string]any{"manifest": manifest, "snapshot_file": filesystem.SnapshotPath(*snapshot)}
+		if info, statErr := os.Stat(filesystem.SnapshotPath(*snapshot)); statErr == nil {
+			status["snapshot_bytes"] = info.Size()
+			status["snapshot_ready"] = true
+		} else {
+			status["snapshot_ready"] = false
 		}
 		return printJSON(status)
 	default:
@@ -940,9 +898,8 @@ func printUsage() {
 	fmt.Println("usage: golangtools <module> <command> [options]")
 	fmt.Println("modules:")
 	fmt.Println("  filesystem probe -path <mount-or-directory>")
-	fmt.Println("  filesystem scan -root <source-directory> [-output snapshot-dir] [-workers N] [-metadata basic|tree] [-backend auto|windows-mft|windows-native|portable] [-build-index=false] [-progress-interval 2s]")
-	fmt.Println("  filesystem index -snapshot <scan-output-snapshot-dir> [-database query.db] [-batch-size 10000] [-progress-interval 2s]")
-	fmt.Println("  filesystem serve -snapshot <scan-output-snapshot-dir> [-listen 127.0.0.1:8080] [-token token]")
+	fmt.Println("  filesystem scan -root <source-directory> [-output snapshot-dir] [-workers N] [-metadata basic|tree] [-backend auto|windows-mft|windows-native|portable] [-progress-interval 2s]")
+	fmt.Println("  filesystem serve -snapshot <snapshot.gti-or-directory> [-path-root local-root] [-listen 127.0.0.1:8080] [-token token]")
 	fmt.Println("  filesystem status -snapshot <snapshot-dir>")
 	fmt.Println("  archive encode -path <file-or-directory> [-output path]")
 	fmt.Println("  archive decode -input <encoded-file> [-output path]")
