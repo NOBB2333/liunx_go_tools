@@ -4,13 +4,13 @@ import { ref } from 'vue'
 import { copyText, formatBytes, formatTimestamp, openItem } from '../api'
 import type { Item } from '../types'
 
-const props = withDefaults(defineProps<{ items: Item[]; loading?: boolean; metric?: 'allocated' | 'logical' }>(), { metric: 'allocated' })
+const props = withDefaults(defineProps<{ items: Item[]; loading?: boolean; metric?: 'allocated' | 'logical'; allocatedKnown?: boolean }>(), { metric: 'logical', allocatedKnown: true })
 const emit = defineEmits<{ open: [id: number]; error: [message: string] }>()
 const copiedID = ref<number | null>(null)
 const openedID = ref<number | null>(null)
 
 function itemSize(item: Item): number {
-  return props.metric === 'logical' ? item.size_bytes : item.allocated_bytes
+  return props.metric === 'allocated' && props.allocatedKnown ? item.allocated_bytes : item.size_bytes
 }
 
 async function copyPath(item: Item) {
@@ -55,7 +55,8 @@ async function openPath(item: Item) {
       </button>
       <span class="flex shrink-0 items-baseline gap-2 text-xs lg:text-right">
         <strong class="font-normal text-zinc-300">{{ formatBytes(itemSize(item)) }}</strong>
-        <span class="text-zinc-600">逻辑 {{ formatBytes(item.size_bytes) }}</span>
+        <span v-if="props.metric === 'allocated' && !props.allocatedKnown" class="text-zinc-500">逻辑大小 · 实际占用不可用</span>
+        <span v-else class="text-zinc-600">逻辑 {{ formatBytes(item.size_bytes) }}</span>
       </span>
       <div class="flex shrink-0 items-center justify-between gap-3 lg:justify-end">
         <span v-if="!item.is_dir" class="max-w-[280px] truncate text-[11px] text-zinc-500" :title="`修改 ${formatTimestamp(item.mtime_ns)} | 创建 ${formatTimestamp(item.birthtime_ns)} | 元数据 ${formatTimestamp(item.ctime_ns)}`">改 {{ formatTimestamp(item.mtime_ns) }} · 建 {{ formatTimestamp(item.birthtime_ns) }} · 元 {{ formatTimestamp(item.ctime_ns) }}</span>

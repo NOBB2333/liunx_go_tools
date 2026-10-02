@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -25,6 +26,7 @@ type FastScanOptions struct {
 	OutputDir        string
 	Workers          int
 	Metadata         FastMetadataMode
+	Backend          FastScanBackend
 	ProgressInterval time.Duration
 	Progress         func(ScanProgress)
 
@@ -32,6 +34,17 @@ type FastScanOptions struct {
 	// cycles and cross-device walks possible and is not useful for a tree index.
 	FollowSymlinks bool
 }
+
+// FastScanBackend selects the platform scanner. Auto uses the Windows NTFS
+// MFT backend when available and otherwise falls back to native enumeration.
+type FastScanBackend string
+
+const (
+	FastScanBackendAuto          FastScanBackend = "auto"
+	FastScanBackendWindowsMFT    FastScanBackend = "windows-mft"
+	FastScanBackendWindowsNative FastScanBackend = "windows-native"
+	FastScanBackendPortable      FastScanBackend = "portable"
+)
 
 type ScanProgress struct {
 	Phase            string        `json:"phase"`
@@ -61,6 +74,9 @@ type FastScanSummary struct {
 	Root             string        `json:"root"`
 	OutputDir        string        `json:"output_dir"`
 	Metadata         string        `json:"metadata"`
+	ScannerBackend   string        `json:"scanner_backend"`
+	AllocatedKnown   bool          `json:"allocated_bytes_known"`
+	AllocationSource string        `json:"allocation_source,omitempty"`
 	Workers          int           `json:"workers"`
 	Files            uint64        `json:"files"`
 	Directories      uint64        `json:"directories"`
@@ -291,21 +307,44 @@ func (s *FastScanner) Scan(ctx context.Context, opt FastScanOptions) (FastScanSu
 	if opt.ProgressInterval <= 0 {
 		opt.ProgressInterval = 2 * time.Second
 	}
+	if opt.Backend == "" {
+		opt.Backend = FastScanBackendAuto
+	}
+	switch opt.Backend {
+	case FastScanBackendAuto, FastScanBackendWindowsMFT, FastScanBackendWindowsNative, FastScanBackendPortable:
+	default:
+		return FastScanSummary{}, fmt.Errorf("unsupported scan backend: %s", opt.Backend)
+	}
 	if opt.FollowSymlinks {
 		return FastScanSummary{}, errors.New("follow-symlinks is not supported by the bounded scanner")
 	}
 	if err := os.MkdirAll(opt.OutputDir, 0755); err != nil {
 		return FastScanSummary{}, err
 	}
+	if runtime.GOOS == "windows" && (opt.Backend == FastScanBackendAuto || opt.Backend == FastScanBackendWindowsMFT) {
+		summary, handled, mftErr := scanWindowsMFT(ctx, opt, root)
+		if handled {
+			return summary, mftErr
+		}
+		if opt.Backend == FastScanBackendWindowsMFT {
+			return FastScanSummary{}, fmt.Errorf("Windows NTFS MFT backend is unavailable; run as administrator on a local NTFS volume or use -backend windows-native: %w", mftErr)
+		}
+		if opt.Progress != nil {
+			opt.Progress(ScanProgress{Phase: "fallback", Message: fmt.Sprintf("NTFS MFT 不可用，回退到 Win32 原生枚举：%v", mftErr)})
+		}
+	}
 
 	started := time.Now()
 	summary := FastScanSummary{
-		SchemaVersion: snapshotSchemaVersion,
-		Root:          root,
-		OutputDir:     opt.OutputDir,
-		Metadata:      string(opt.Metadata),
-		Workers:       opt.Workers,
-		StartedAt:     started,
+		SchemaVersion:    snapshotSchemaVersion,
+		Root:             root,
+		OutputDir:        opt.OutputDir,
+		Metadata:         string(opt.Metadata),
+		ScannerBackend:   scannerBackendName(opt.Backend),
+		AllocatedKnown:   scannerAllocationKnown(opt.Backend, opt.Metadata),
+		AllocationSource: scannerAllocationSource(opt.Backend, opt.Metadata),
+		Workers:          opt.Workers,
+		StartedAt:        started,
 	}
 
 	files, err := os.OpenFile(filepath.Join(opt.OutputDir, "files.seg"), os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0644)
@@ -497,6 +536,42 @@ func (s *FastScanner) Scan(ctx context.Context, opt FastScanOptions) (FastScanSu
 	return summary, nil
 }
 
+func scannerBackendName(backend FastScanBackend) string {
+	if backend == FastScanBackendAuto {
+		switch runtime.GOOS {
+		case "windows":
+			return string(FastScanBackendWindowsNative)
+		case "linux":
+			return "linux-native"
+		case "darwin":
+			return "macos-native"
+		default:
+			return string(FastScanBackendPortable)
+		}
+	}
+	return string(backend)
+}
+
+func scannerAllocationKnown(backend FastScanBackend, metadata FastMetadataMode) bool {
+	if metadata == FastMetadataTree && !(runtime.GOOS == "windows" && backend == FastScanBackendWindowsMFT) {
+		return false
+	}
+	return runtime.GOOS != "windows" || backend == FastScanBackendWindowsMFT
+}
+
+func scannerAllocationSource(backend FastScanBackend, metadata FastMetadataMode) string {
+	if !scannerAllocationKnown(backend, metadata) {
+		return "unknown"
+	}
+	if runtime.GOOS != "windows" {
+		return "stat"
+	}
+	if backend == FastScanBackendWindowsMFT {
+		return "ntfs-mft"
+	}
+	return "unknown"
+}
+
 func emitScanProgress(progress func(ScanProgress), started time.Time, files, dirs, completed, errors, logical, allocated uint64, message string) {
 	if progress == nil {
 		return
@@ -525,6 +600,9 @@ func (s *FastScanner) scanDirectory(
 	dirsSeen, filesSeen, logicalBytes, allocatedBytes, errorCount *atomic.Uint64,
 	aggregator *fastAggregator,
 ) (uint64, uint64, uint64) {
+	if runtime.GOOS == "windows" && opt.Backend == FastScanBackendPortable {
+		return scanDirectoryPortable(ctx, task, opt, nextID, pending, jobs, fileRecords, errorRecords, dirsSeen, filesSeen, logicalBytes, allocatedBytes, errorCount, aggregator)
+	}
 	return scanDirectoryNative(ctx, task, opt, nextID, pending, jobs, fileRecords, errorRecords, dirsSeen, filesSeen, logicalBytes, allocatedBytes, errorCount, aggregator)
 }
 

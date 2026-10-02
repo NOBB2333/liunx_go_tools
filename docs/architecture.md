@@ -27,7 +27,7 @@ web/
 
 ```mermaid
 flowchart LR
-    A[目录树] --> B[原生并发扫描器]
+    A[目录树或 NTFS 卷] --> B[平台扫描后端]
     B --> C[版本化 segment]
     C --> D[批量索引构建器]
     D --> E[SQLite query.db]
@@ -37,7 +37,7 @@ flowchart LR
 
 扫描与查询分为两个阶段。扫描热路径不执行 SQL，也不拼接完整路径到每条记录；文件只保存父目录数字 ID 和名称。查询库可以随时从 segment 重建。
 
-Linux 扫描器使用目录 fd、`getdents64` 和相对目录的 `statx`。macOS 使用有界并发 `readdir`；目录任务通过 dispatcher 排队，避免宽目录下 worker 相互阻塞。
+Linux 扫描器使用目录 fd、`getdents64` 和相对目录的 `statx`。macOS 使用有界并发 `readdir`；目录任务通过 dispatcher 排队，避免宽目录下 worker 相互阻塞。Windows 的 `auto` 后端优先读取本地 NTFS 卷的 `$MFT` 数据流，以大块顺序 I/O 解析 fixup、runlist、`$STANDARD_INFORMATION`、`$FILE_NAME` 和未命名 `$DATA`；无卷读取权限或不是 NTFS 时回退到 `FindFirstFileW/FindNextFileW` 原生枚举。两个 Windows 后端输出相同的 segment 合约。
 
 HTTP 服务以只读模式打开 SQLite。默认只监听 `127.0.0.1`；非回环监听自动启用 token，首次 URL token 会交换为 HttpOnly Cookie。
 

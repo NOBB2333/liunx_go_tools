@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -145,6 +146,32 @@ func TestIndexBuilderRejectsRawDirectoryWithActionableError(t *testing.T) {
 		!strings.Contains(message, "missing manifest.json") ||
 		!strings.Contains(message, "filesystem scan -root") {
 		t.Fatalf("error does not explain how to recover: %q", message)
+	}
+}
+
+func TestReadManifestInfersLegacyAllocationCapability(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		allocated uint64
+		known     bool
+	}{
+		{name: "unix snapshot with blocks", allocated: 4096, known: true},
+		{name: "windows snapshot without blocks", allocated: 0, known: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			snapshot := t.TempDir()
+			data := []byte(`{"root":"/data","allocated_bytes":` + fmt.Sprintf("%d", test.allocated) + `,"complete":true}`)
+			if err := os.WriteFile(filepath.Join(snapshot, "manifest.json"), data, 0644); err != nil {
+				t.Fatal(err)
+			}
+			manifest, err := readManifest(snapshot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if manifest.AllocatedKnown != test.known {
+				t.Fatalf("allocated known = %v, want %v", manifest.AllocatedKnown, test.known)
+			}
+		})
 	}
 }
 

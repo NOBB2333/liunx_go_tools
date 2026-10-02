@@ -2,7 +2,7 @@
 import { Check, ChevronLeft, ChevronRight, Copy, FolderOpen, Search } from 'lucide-vue-next'
 import { nextTick, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { copyText, formatBytes, formatTimestamp, openItem, searchFiles } from '../api'
+import { copyText, formatBytes, formatTimestamp, getSummary, openItem, searchFiles } from '../api'
 import type { Item } from '../types'
 
 const pageSize = 100
@@ -15,6 +15,7 @@ const loading = ref(false)
 const error = ref('')
 const copiedID = ref<number | null>(null)
 const openedID = ref<number | null>(null)
+const allocatedKnown = ref(false)
 
 async function loadPage(nextOffset: number) {
   const scrollY = window.scrollY
@@ -64,7 +65,13 @@ function submit() {
   void loadPage(0)
 }
 
-onMounted(() => {
+onMounted(async () => {
+  try {
+    const summary = await getSummary()
+    allocatedKnown.value = summary.manifest.allocated_bytes_known
+  } catch {
+    allocatedKnown.value = false
+  }
   if (query.value.trim()) void loadPage(offset.value)
 })
 </script>
@@ -90,8 +97,9 @@ onMounted(() => {
             <span class="block truncate text-xs text-zinc-500">{{ item.path || '路径不可用' }}</span>
           </span>
           <span class="flex shrink-0 items-baseline gap-2 text-xs">
-            <strong class="font-normal text-zinc-300">{{ formatBytes(item.allocated_bytes) }}</strong>
-            <span class="text-zinc-600">逻辑 {{ formatBytes(item.size_bytes) }}</span>
+            <strong class="font-normal text-zinc-300">{{ formatBytes(allocatedKnown ? item.allocated_bytes : item.size_bytes) }}</strong>
+            <span v-if="!allocatedKnown" class="text-zinc-500">逻辑大小 · 实际占用不可用</span>
+            <span v-else class="text-zinc-600">逻辑 {{ formatBytes(item.size_bytes) }}</span>
           </span>
           <span class="flex shrink-0 items-center justify-between gap-3 lg:justify-end">
             <span class="max-w-[280px] truncate text-[11px] text-zinc-500" :title="`修改 ${formatTimestamp(item.mtime_ns)} | 创建 ${formatTimestamp(item.birthtime_ns)} | 元数据 ${formatTimestamp(item.ctime_ns)}`">改 {{ formatTimestamp(item.mtime_ns) }} · 建 {{ formatTimestamp(item.birthtime_ns) }} · 元 {{ formatTimestamp(item.ctime_ns) }}</span>

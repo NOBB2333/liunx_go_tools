@@ -1,5 +1,8 @@
 export type Manifest = {
   root: string
+  scanner_backend?: string
+  allocated_bytes_known: boolean
+  allocation_source?: string
   files: number
   directories: number
   logical_bytes: number

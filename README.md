@@ -53,6 +53,8 @@ golangtools-windows-arm64.exe
 
 `basic` 会读取文件大小、分配块、mtime、ctime、birthtime、inode 和 mode，用于空间分析。只需要文件名和目录结构时可使用 `-metadata tree`，它会跳过文件元数据读取。页面默认展示实际分配空间，同时保留逻辑大小；稀疏文件、APFS clone、硬链接会让逻辑大小重复计数，这是正常现象。
 
+Windows 默认使用 `-backend auto`：本地 NTFS 优先走 MFT 顺序读取，权限或卷类型不满足时回退到 Win32 原生枚举。可用 `-backend windows-mft` 强制 MFT，或用 `-backend windows-native` 做回退路径测试。原生回退没有逐文件 NTFS 分配块信息，会在 manifest 中标记 `allocated_bytes_known=false`，查看器会使用逻辑大小，不会把 0 显示成真实占用。
+
 默认 worker 数经过平台限制：macOS 最多 64，其他平台最多 32。机械盘随机寻道成本较高，可以显式测试 `-workers 2`、`4`、`8`；SSD/APFS 通常适合更高并发。
 
 扫描热路径只写 `files.seg`、`directories.seg` 和 `errors.ndjson`。扫描完成后才批量生成带扩展名统计和 FTS5 trigram 文件名索引的 `query.db`。终端会持续打印阶段、实时吞吐、条目数量、错误数量和耗时；默认每 2 秒刷新，可用 `-progress-interval 5s` 调整。首次扫描没有可靠的总条目数，因此不会显示虚假百分比；索引阶段有百分比。

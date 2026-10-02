@@ -368,7 +368,11 @@ func (s *Server) handleChildren(w http.ResponseWriter, r *http.Request, path str
 		return
 	}
 	limit, offset := pagination(r)
-	sortSQL := safeSort(r.URL.Query().Get("sort"))
+	sortValue := r.URL.Query().Get("sort")
+	sortSQL := safeSort(sortValue)
+	if !s.manifest.AllocatedKnown && sortValue != "name" && sortValue != "mtime" {
+		sortSQL = "size_bytes DESC, is_dir DESC, id ASC"
+	}
 	directoryAllocated := "0"
 	if s.hasDirAlloc {
 		directoryAllocated = "allocated_bytes"
@@ -404,6 +408,9 @@ func (s *Server) handleChildren(w http.ResponseWriter, r *http.Request, path str
 func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 	limit, offset := pagination(r)
 	order := "blocks DESC, id ASC"
+	if !s.manifest.AllocatedKnown {
+		order = "size DESC, id ASC"
+	}
 	switch r.URL.Query().Get("sort") {
 	case "name":
 		order = "name COLLATE NOCASE ASC, id ASC"
@@ -444,12 +451,20 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if s.hasSearch && utf8.RuneCountInString(term) >= 3 {
 		engine = "trigram"
 		phrase := `"` + strings.ReplaceAll(term, `"`, `""`) + `"`
+		order := "f.blocks * 512 DESC"
+		if !s.manifest.AllocatedKnown {
+			order = "f.size DESC"
+		}
 		rows, err = s.db.QueryContext(r.Context(), fmt.Sprintf(`SELECT f.id,f.parent_id,f.name,0,f.size,f.blocks * 512,0,0,f.mtime_ns,%s,%s,f.extension
 			FROM file_search JOIN files f ON f.id = file_search.rowid
-			WHERE file_search MATCH ? ORDER BY f.blocks * 512 DESC LIMIT ? OFFSET ?`, s.fileTimeExpr("f.ctime_ns"), s.fileTimeExpr("f.birthtime_ns")), phrase, limit, offset)
+			WHERE file_search MATCH ? ORDER BY %s LIMIT ? OFFSET ?`, s.fileTimeExpr("f.ctime_ns"), s.fileTimeExpr("f.birthtime_ns"), order), phrase, limit, offset)
 	} else {
 		pattern := "%" + term + "%"
-		rows, err = s.db.QueryContext(r.Context(), fmt.Sprintf(`SELECT id,parent_id,name,0,size,blocks * 512,0,0,mtime_ns,%s,%s,extension FROM files WHERE name LIKE ? COLLATE NOCASE ORDER BY blocks * 512 DESC LIMIT ? OFFSET ?`, s.fileTimeExpr("ctime_ns"), s.fileTimeExpr("birthtime_ns")), pattern, limit, offset)
+		order := "blocks * 512 DESC"
+		if !s.manifest.AllocatedKnown {
+			order = "size DESC"
+		}
+		rows, err = s.db.QueryContext(r.Context(), fmt.Sprintf(`SELECT id,parent_id,name,0,size,blocks * 512,0,0,mtime_ns,%s,%s,extension FROM files WHERE name LIKE ? COLLATE NOCASE ORDER BY %s LIMIT ? OFFSET ?`, s.fileTimeExpr("ctime_ns"), s.fileTimeExpr("birthtime_ns"), order), pattern, limit, offset)
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "query_failed", err.Error())

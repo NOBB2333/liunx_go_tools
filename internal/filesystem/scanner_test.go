@@ -89,7 +89,7 @@ func TestFastScannerTreeModeAvoidsMetadataTotals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	if summary.Files != 1 || summary.LogicalBytes != 0 || summary.AllocatedBytes != 0 {
+	if summary.Files != 1 || summary.LogicalBytes != 0 || summary.AllocatedBytes != 0 || summary.AllocatedKnown {
 		t.Fatalf("tree mode unexpectedly collected sizes: %+v", summary)
 	}
 }

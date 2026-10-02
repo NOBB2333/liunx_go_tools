@@ -25,6 +25,9 @@ type SnapshotManifest struct {
 	Root             string    `json:"root"`
 	OutputDir        string    `json:"output_dir"`
 	Metadata         string    `json:"metadata"`
+	ScannerBackend   string    `json:"scanner_backend,omitempty"`
+	AllocatedKnown   bool      `json:"allocated_bytes_known"`
+	AllocationSource string    `json:"allocation_source,omitempty"`
 	Workers          int       `json:"workers"`
 	Files            uint64    `json:"files"`
 	Directories      uint64    `json:"directories"`
@@ -278,6 +281,18 @@ func readManifest(snapshotDir string) (SnapshotManifest, error) {
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return SnapshotManifest{}, err
 	}
+	// Snapshots predating the explicit capability flag can still expose their
+	// collected block total. Old Windows snapshots have a zero total and remain
+	// unknown; Unix snapshots with a nonzero total retain their old behavior.
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err == nil {
+		if _, present := fields["allocated_bytes_known"]; !present && manifest.AllocatedBytes > 0 {
+			manifest.AllocatedKnown = true
+			if manifest.AllocationSource == "" {
+				manifest.AllocationSource = "legacy-stat"
+			}
+		}
+	}
 	return manifest, nil
 }
 
@@ -405,6 +420,9 @@ func writeMetadata(ctx context.Context, db *sql.DB, manifest SnapshotManifest) e
 		"schema_version":      fmt.Sprintf("%d", snapshotSchemaVersion),
 		"root":                manifest.Root,
 		"metadata":            manifest.Metadata,
+		"scanner_backend":     manifest.ScannerBackend,
+		"allocated_known":     fmt.Sprintf("%t", manifest.AllocatedKnown),
+		"allocation_source":   manifest.AllocationSource,
 		"files":               fmt.Sprintf("%d", manifest.Files),
 		"directories":         fmt.Sprintf("%d", manifest.Directories),
 		"logical_bytes":       fmt.Sprintf("%d", manifest.LogicalBytes),

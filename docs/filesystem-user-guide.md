@@ -156,7 +156,22 @@ Get-Content "$SNAPSHOT\run.log" -Wait
 
 ## 6. 并发和速度调优
 
-worker 主要影响目录枚举和元数据读取。先用默认值跑一次基准，再只调整 `-workers` 比较同一个卷的耗时：
+Windows 有两条扫描路径。`-backend auto`（默认）先尝试本地 NTFS 的 MFT 顺序读取；它一次读取 MFT 大块数据并从记录中恢复目录、文件名、大小和时间，成功时不需要对每个文件调用 `CreateFile`。这条路径需要本地 NTFS 卷和读取卷设备的权限，通常需要以管理员身份运行。不能直接读卷、目标是 ReFS/FAT/网络映射盘或权限不足时，`auto` 会自动回退到 `windows-native`，使用 `FindFirstFileW/FindNextFileW` 的原生目录枚举。
+
+可以显式选择路径：
+
+```powershell
+# 自动选择：优先 MFT，失败后回退
+& $BIN filesystem scan -root "D:\3_Dowload" -output $SNAPSHOT -backend auto
+
+# 强制 NTFS MFT；不可用时直接报出权限/卷类型错误
+& $BIN filesystem scan -root "D:\3_Dowload" -output $SNAPSHOT -backend windows-mft
+
+# 强制普通 Win32 枚举，适合验证回退路径
+& $BIN filesystem scan -root "D:\3_Dowload" -output $SNAPSHOT -backend windows-native
+```
+
+MFT 路径是顺序读取和解析，`-workers` 对它不会产生同样的并发效果；原生路径的 worker 主要影响目录枚举。先用默认值跑一次基准，再只调整 `-workers` 比较同一个卷的耗时：
 
 | 存储 | 建议起点 | 说明 |
 | --- | ---: | --- |
@@ -172,6 +187,8 @@ worker 主要影响目录枚举和元数据读取。先用默认值跑一次基�
 ```
 
 `-metadata tree` 会跳过文件 `stat`，适合只需要目录、文件名和层级的快速目录树；空间大小、分配块、权限和时间字段需要 `-metadata basic`。改变 worker 不会改变快照格式，可以用不同快照目录做对比。
+
+Windows 原生回退能从 Win32 查找结果直接得到逻辑大小和时间，但 `FindFirstFileW` 不提供每个文件的 NTFS 分配块。为了避免一千万次句柄调用拖慢扫描，回退快照会把实际占用标记为未知，记录中的 `allocated_bytes` 为 0 只是占位，不是文件真的占用 0 字节；网页会自动使用逻辑大小并显示“实际占用不可用”。只有 `scanner_backend=windows-mft` 且 `allocated_bytes_known=true` 时，0 才代表 MFT 解析得到的真实分配结果。
 
 ## 7. 快照目录结构
 
@@ -204,6 +221,8 @@ run.log             本次文件系统命令的 JSONL 运行日志
 - 复制绝对路径。
 - 搜索文件名并分页查看结果。
 - 在本机文件管理器中打开记录。
+
+页面读取 `manifest.allocated_bytes_known`：Windows 原生回退或旧快照没有实际块信息时，默认展示逻辑大小并禁用“实际占用”切换，避免把 0 误认为真实占用。NTFS MFT 快照会显示并默认使用实际分配空间。
 
 “打开”按钮由本机 Go 进程调用 Finder、Windows Explorer 或 Linux `xdg-open`。浏览器不会申请文件系统权限，也不会让你为每一个目录点击授权。接口只接受回环请求，并且路径来自只读索引；远程设备即使能浏览页面，也不能让它控制主机文件管理器。
 

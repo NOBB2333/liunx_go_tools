@@ -113,6 +113,7 @@ func runFilesystem(args []string) error {
 		output := fs.String("output", "", "snapshot output directory")
 		workers := fs.Int("workers", 0, "scanner worker count; 0 selects the platform default")
 		metadata := fs.String("metadata", "basic", "metadata mode: basic or tree")
+		backend := fs.String("backend", "auto", "scanner backend: auto, windows-mft, windows-native, or portable")
 		buildIndex := fs.Bool("build-index", true, "build query.db after scanning")
 		batchSize := fs.Int("batch-size", 10000, "SQLite index batch size")
 		progressInterval := fs.Duration("progress-interval", 2*time.Second, "progress report interval")
@@ -129,7 +130,7 @@ func runFilesystem(args []string) error {
 		if activeLogger != nil {
 			_ = os.MkdirAll(outputDir, 0755)
 			_ = activeLogger.Attach(filepath.Join(outputDir, "run.log"))
-			activeLogger.Phase("config", "准备文件系统扫描", map[string]any{"root": *root, "output_dir": outputDir, "workers": *workers, "metadata": *metadata})
+			activeLogger.Phase("config", "准备文件系统扫描", map[string]any{"root": *root, "output_dir": outputDir, "workers": *workers, "metadata": *metadata, "backend": *backend})
 		}
 		ctx, cancel := signalContext()
 		defer cancel()
@@ -138,6 +139,7 @@ func runFilesystem(args []string) error {
 			OutputDir:        outputDir,
 			Workers:          *workers,
 			Metadata:         filesystem.FastMetadataMode(strings.ToLower(strings.TrimSpace(*metadata))),
+			Backend:          filesystem.FastScanBackend(strings.ToLower(strings.TrimSpace(*backend))),
 			ProgressInterval: *progressInterval,
 			Progress: func(progress filesystem.ScanProgress) {
 				if activeLogger == nil {
@@ -938,7 +940,7 @@ func printUsage() {
 	fmt.Println("usage: golangtools <module> <command> [options]")
 	fmt.Println("modules:")
 	fmt.Println("  filesystem probe -path <mount-or-directory>")
-	fmt.Println("  filesystem scan -root <source-directory> [-output snapshot-dir] [-workers N] [-metadata basic|tree] [-build-index=false] [-progress-interval 2s]")
+	fmt.Println("  filesystem scan -root <source-directory> [-output snapshot-dir] [-workers N] [-metadata basic|tree] [-backend auto|windows-mft|windows-native|portable] [-build-index=false] [-progress-interval 2s]")
 	fmt.Println("  filesystem index -snapshot <scan-output-snapshot-dir> [-database query.db] [-batch-size 10000] [-progress-interval 2s]")
 	fmt.Println("  filesystem serve -snapshot <scan-output-snapshot-dir> [-listen 127.0.0.1:8080] [-token token]")
 	fmt.Println("  filesystem status -snapshot <snapshot-dir>")

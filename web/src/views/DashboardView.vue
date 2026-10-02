@@ -21,11 +21,13 @@ const pageMeta = ref<PageMeta>({ limit: pageSize, offset: 0, total: 0 })
 const sort = ref('size')
 const loading = ref(true)
 const error = ref('')
-const metric = ref<'allocated' | 'logical'>('allocated')
+const metric = ref<'allocated' | 'logical'>('logical')
 const copiedPath = ref(false)
 const openedPath = ref(false)
 const directories = computed(() => children.value.filter(item => item.is_dir))
-const maxSize = computed(() => Math.max(1, ...directories.value.map(item => metric.value === 'allocated' ? item.allocated_bytes : item.size_bytes)))
+const allocatedKnown = computed(() => summary.value?.manifest.allocated_bytes_known === true)
+const maxSize = computed(() => Math.max(1, ...directories.value.map(item => metric.value === 'allocated' && allocatedKnown.value ? item.allocated_bytes : item.size_bytes)))
+const extensionSize = (item?: ExtensionStat) => item ? (allocatedKnown.value ? item.allocated_bytes : item.size_bytes) : 0
 const total = computed(() => pageMeta.value.total || 0)
 const pageStart = computed(() => total.value === 0 ? 0 : offset.value + 1)
 const pageEnd = computed(() => Math.min(offset.value + children.value.length, total.value))
@@ -88,6 +90,7 @@ onMounted(async () => {
   try {
     const [nextSummary, nextExtensions] = await Promise.all([getSummary(), getExtensions()])
     summary.value = nextSummary
+    metric.value = nextSummary.manifest.allocated_bytes_known ? 'allocated' : 'logical'
     extensions.value = nextExtensions
     await loadDirectory(directory.value, offset.value)
   } catch (cause) {
@@ -117,7 +120,7 @@ watch(() => [route.query.directory, route.query.offset], ([directoryQuery, offse
     <section class="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-5">
       <StatCard label="文件" :value="formatCount(summary.manifest.files)" />
       <StatCard label="目录" :value="formatCount(summary.manifest.directories)" />
-      <StatCard label="实际占用" :value="formatBytes(summary.manifest.allocated_bytes)" />
+      <StatCard label="实际占用" :value="allocatedKnown ? formatBytes(summary.manifest.allocated_bytes) : '不可用'" />
       <StatCard label="逻辑大小" :value="formatBytes(summary.manifest.logical_bytes)" />
       <StatCard label="扫描耗时" :value="`${(summary.manifest.duration_ns / 1e9).toFixed(1)} s`" />
     </section>
@@ -164,14 +167,14 @@ watch(() => [route.query.directory, route.query.offset], ([directoryQuery, offse
         </nav>
 
         <div class="mt-3 flex flex-wrap items-center justify-between gap-3">
-          <span class="text-xs text-zinc-500">当前目录空间图与列表使用：</span>
+          <span class="text-xs text-zinc-500">当前目录空间图与列表使用：{{ allocatedKnown ? '' : '实际占用不可用，已使用逻辑大小' }}</span>
           <div class="flex rounded border border-zinc-700 p-0.5 text-xs" role="group" aria-label="空间计算方式">
-            <button class="rounded px-2 py-1" :class="metric === 'allocated' ? 'bg-emerald-400 text-zinc-950' : 'text-zinc-400 hover:text-white'" @click="metric = 'allocated'">实际占用</button>
+            <button class="rounded px-2 py-1 disabled:cursor-not-allowed disabled:opacity-40" :class="metric === 'allocated' ? 'bg-emerald-400 text-zinc-950' : 'text-zinc-400 hover:text-white'" :disabled="!allocatedKnown" @click="metric = 'allocated'">实际占用</button>
             <button class="rounded px-2 py-1" :class="metric === 'logical' ? 'bg-emerald-400 text-zinc-950' : 'text-zinc-400 hover:text-white'" @click="metric = 'logical'">逻辑大小</button>
           </div>
         </div>
         <SpaceMap :items="directories" :max-size="maxSize" :metric="metric" @open="id => loadDirectory(id)" />
-        <EntryList :key="directory" class="mt-3" :items="children" :loading="loading" :metric="metric" @open="id => loadDirectory(id)" @error="error = $event" />
+        <EntryList class="mt-3" :items="children" :loading="loading" :metric="metric" :allocated-known="allocatedKnown" @open="id => loadDirectory(id)" @error="error = $event" />
 
         <footer class="mt-4 flex min-h-9 items-center justify-between border-t border-zinc-800 pt-4 text-xs text-zinc-500">
           <span>{{ pageStart }}-{{ pageEnd }} / {{ formatCount(total) }}</span>
@@ -193,8 +196,8 @@ watch(() => [route.query.directory, route.query.offset], ([directoryQuery, offse
           <div class="mt-4 grid gap-3">
             <div v-for="item in extensions" :key="item.extension" class="grid grid-cols-[70px_1fr_auto] items-center gap-2 text-xs">
               <span class="truncate text-zinc-400">{{ item.extension }}</span>
-              <span class="h-2 overflow-hidden rounded bg-zinc-800"><i class="block h-full bg-emerald-400" :style="{ width: `${Math.min(100, (item.allocated_bytes / Math.max(1, extensions[0]?.allocated_bytes || 1)) * 100)}%` }" /></span>
-              <strong class="font-normal text-zinc-500">{{ formatBytes(item.allocated_bytes) }}</strong>
+              <span class="h-2 overflow-hidden rounded bg-zinc-800"><i class="block h-full bg-emerald-400" :style="{ width: `${Math.min(100, (extensionSize(item) / Math.max(1, extensionSize(extensions[0]) || 1)) * 100)}%` }" /></span>
+              <strong class="font-normal text-zinc-500">{{ formatBytes(extensionSize(item)) }}</strong>
             </div>
           </div>
         </div>

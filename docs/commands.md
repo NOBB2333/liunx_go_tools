@@ -10,7 +10,7 @@ golangtools <module> <command> [options]
 
 ```bash
 golangtools filesystem probe -path <path>
-golangtools filesystem scan -root <source-directory> [-output snapshot] [-workers N] [-metadata basic|tree] [-build-index=true] [-progress-interval 2s]
+golangtools filesystem scan -root <source-directory> [-output snapshot] [-workers N] [-metadata basic|tree] [-backend auto|windows-mft|windows-native|portable] [-build-index=true] [-progress-interval 2s]
 golangtools filesystem index -snapshot <scan-output-snapshot-dir> [-database query.db] [-batch-size 10000] [-progress-interval 2s]
 golangtools filesystem status -snapshot <snapshot>
 golangtools filesystem serve -snapshot <scan-output-snapshot-dir> [-listen 127.0.0.1:8080] [-token token]
@@ -26,6 +26,8 @@ $SNAPSHOT = "D:\golangtools-snapshots\download-$(Get-Date -Format yyyyMMdd-HHmms
 & $BIN filesystem scan -root "D:\3_Dowload" -output $SNAPSHOT -metadata basic -progress-interval 5s
 & $BIN filesystem serve -snapshot $SNAPSHOT -listen 127.0.0.1:8080
 ```
+
+Windows 的 `auto` 后端优先顺序读取本地 NTFS 的 MFT，需要读取卷设备的权限；不可用时自动回退到 `windows-native`。强制 `windows-mft` 时不会回退，适合确认管理员权限和 NTFS 快速路径是否生效。最终使用的后端会写入 `manifest.json` 的 `scanner_backend`。
 
 需要延迟建索引时，在 `scan` 添加 `-build-index false`，之后单独执行 `filesystem index -snapshot $SNAPSHOT`。
 

@@ -9,5 +9,6 @@
 }
 
 body { margin: 0; min-width: 320px; }
+html { overflow-anchor: none; }
 button, input, select { font: inherit; }
 button { cursor: pointer; }

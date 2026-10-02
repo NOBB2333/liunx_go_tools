@@ -12,9 +12,9 @@ query.db
 
 ## manifest.json
 
-记录 schema 版本、根目录、扫描模式、worker 数、文件和目录数量、逻辑/分配字节数、错误数、起止时间、耗时和实际吞吐。
+记录 schema 版本、根目录、扫描模式、扫描后端、worker 数、文件和目录数量、逻辑/分配字节数、错误数、起止时间、耗时和实际吞吐。
 
-当前 `schema_version` 为 `3`。目录数量不包含根目录；查询索引包含根目录。扫描过程会写入逻辑字节数和实际分配字节数。稀疏文件、APFS clone 或硬链接可能让逻辑大小大于磁盘容量；空间分析默认使用实际分配字节数。
+当前 `schema_version` 为 `3`。目录数量不包含根目录；查询索引包含根目录。`scanner_backend` 记录最终使用的扫描器，`allocated_bytes_known` 表示实际分配字节是否有效，`allocation_source` 记录其来源。Windows 原生枚举无法在不逐文件打开句柄的前提下获得分配块，因此将 `allocated_bytes_known` 写为 `false`；此时 0 是未知值占位。稀疏文件、APFS clone 或硬链接可能让逻辑大小大于磁盘容量；只有分配字节已知时，空间分析才默认使用实际分配字节数。
 
 ## segment
 
