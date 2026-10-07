@@ -1,0 +1,14 @@
+这个目录存放 Vue 前端构建产物，不入版本库，只提交本文件作为占位，
+让 go:embed 在未构建前端时也能成立。
+
+生成方式（任选其一）：
+
+  ./build.sh                 # macOS / Linux：构建前端 + 测试 + 六个平台二进制
+  .\build.ps1                # Windows
+  make frontend              # 只构建前端
+  cd web && pnpm install && pnpm run build
+
+构建会把本目录重写成真实产物，本文件在下次构建前会被自动清理脚本删除，
+构建后需要重新写回（脚本会处理，不需要手工操作）。
+
+详情见 README 的「前端开发」一节和 docs/web-viewer.md。

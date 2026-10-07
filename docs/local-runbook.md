@@ -45,6 +45,15 @@ golangtools filesystem serve -snapshot /mnt/share/snapshot.gti
 
 如果只想浏览，目标机器不需要存在原始根目录。如果要使用网页的本机打开功能，使用 `-path-root` 映射到目标机器实际路径。
 
+网页文件预览要求原始文件真实存在，因为 GTI 不保存文件内容，预览是现读磁盘。跨机器浏览时预览不可用，属于预期行为。确实需要远程预览时，文件内容接口默认拒绝非回环请求，要显式放开：
+
+```bash
+golangtools filesystem serve \
+  -snapshot /mnt/share/snapshot.gti \
+  -listen 0.0.0.0:8080 \
+  -allow-remote-content
+```
+
 ## 日志
 
 - `~/.golangtools/logs/*.jsonl`：工具级命令日志。
@@ -72,4 +81,9 @@ Ctrl-C 会取消扫描。未完成的临时记录会留在输出目录中，但�
 | Windows 实际占用为未知 | 使用 NTFS MFT 后端并授予管理员权限；Win32 回退没有逐文件分配块信息 |
 | 页面搜索较慢 | 任意子串搜索默认扫描名称记录，这是为了避免生成巨大的搜索副本；目录浏览不受影响 |
 | 点击打开失败 | 目标机没有对应原始路径或当前用户权限不足；检查 `-path-root` |
+| 预览提示路径不存在 | 扫描和 serve 不在同一台机器，或文件已被删除；GTI 不保存文件内容 |
+| 远程预览返回 403 | 加 `-allow-remote-content` 显式放开文件内容接口 |
+| 网页显示「需重新扫描」 | 旧快照没写入目录递归统计值；重新执行 `filesystem scan` |
+| 克隆后二进制没有网页界面 | 前端产物不入库；跑 `./build.sh`、`.\build.ps1` 或 `make frontend` 生成后再编译 |
+| 改了前端但页面没变 | 产物是编译期嵌入的，需要重新编译 Go 二进制，只跑 `pnpm run build` 不够 |
 | 旧快照无法打开 | 旧 segment/tree/SQLite 格式已移除；重新扫描生成 GTI |

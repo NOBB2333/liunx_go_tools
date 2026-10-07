@@ -35,6 +35,12 @@ export type DirectoryInfo = {
   name: string
   depth: number
   path?: string
+  // 递归统计值。在这些字段被写入索引之前生成的旧快照不会有它们，
+  // 所以 0 要当作「不可用」处理，而不是当作空目录。
+  size_bytes?: number
+  allocated_bytes?: number
+  file_count?: number
+  dir_count?: number
 }
 
 export type DirectoryContext = {
@@ -57,6 +63,8 @@ export type Summary = {
   manifest: Manifest
   indexed_files: number
   indexed_directories: number
+  snapshot_file?: string
+  path_root?: string
 }
 
 export type ExtensionStat = {
@@ -64,4 +72,14 @@ export type ExtensionStat = {
   files: number
   size_bytes: number
   allocated_bytes: number
+}
+
+export type UiPrefs = {
+  /** 各个可折叠区块的收起状态，键是区块 id */
+  collapsed: Record<string, boolean>
+}
+
+export type ScanError = {
+  path: string
+  error: string
 }

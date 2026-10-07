@@ -52,6 +52,8 @@ birthtime_ns    int64
 
 目录和文件的显示 ID 仍然由 API 暴露，但内部父子关系使用连续 `uint32` 索引。完整路径不重复保存，查询时沿父指针拼接名称。
 
+目录记录里的 `logical_bytes`、`allocated_bytes`、`file_count` 和 `directory_count` 都是**该目录下递归累计**的值，由扫描期的聚合器逐层上卷。在字段被写入之前生成的快照里，`file_count` 和 `directory_count` 恒为 0，网页按「不可用」处理并提示重新扫描。
+
 ## 为什么不用 Protobuf
 
 Protobuf 适合 RPC 和消息交换，不适合作为本项目的主随机访问格式：

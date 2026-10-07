@@ -188,6 +188,7 @@ func runFilesystem(args []string) error {
 		listen := fs.String("listen", "127.0.0.1:8080", "HTTP listen address")
 		pathRoot := fs.String("path-root", "", "override the indexed root path when serving a copied snapshot")
 		token := fs.String("token", "", "bearer token; required for non-loopback listen addresses")
+		allowRemoteContent := fs.Bool("allow-remote-content", false, "allow non-loopback clients to read file contents for previewing")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
@@ -203,7 +204,7 @@ func runFilesystem(args []string) error {
 			serveToken = generated
 			fmt.Println("generated token:", serveToken)
 		}
-		server, err := filesystem.OpenServer(filesystem.ServerOptions{SnapshotDir: *snapshot, PathRoot: *pathRoot, Token: serveToken})
+		server, err := filesystem.OpenServer(filesystem.ServerOptions{SnapshotDir: *snapshot, PathRoot: *pathRoot, Token: serveToken, AllowRemoteContent: *allowRemoteContent})
 		if err != nil {
 			return err
 		}

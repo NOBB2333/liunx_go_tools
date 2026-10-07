@@ -13,6 +13,8 @@ run.log        本次运行日志
 
 `snapshot.gti` 包含 manifest、目录记录、文件记录、名称池、父子索引、扩展名统计和错误记录。文件不包含原始文件内容。
 
+目录记录里含有扫描时算好的递归统计值（该目录下累计的文件数、目录数、逻辑大小和分配大小），网页的「当前目录最大文件」面板直接读这些值。在它们被写入索引之前生成的旧快照没有这些数字，网页会显示「需重新扫描」，重新执行一次 `filesystem scan` 即可。
+
 旧版 `manifest.json`、`files.seg`、`directories.seg`、`tree.*` 和 `query.db` 不再是正式格式，也不能由新服务读取。旧快照必须重新扫描。
 
 ## 2. 构建和运行
@@ -79,6 +81,9 @@ $SNAPSHOT = ".\golangtools-snapshots\download-$(Get-Date -Format yyyyMMdd-HHmmss
 | `-backend windows-native` | 强制 Win32 原生枚举 |
 | `-progress-interval` | 进度刷新间隔，例如 `5s` |
 | `-path-root` | 在另一台电脑上映射原始根路径 |
+| `-listen` | 查看器监听地址，默认 `127.0.0.1:8080` |
+| `-token` | 固定 bearer 令牌；非回环监听时必填 |
+| `-allow-remote-content` | 允许非回环客户端读取文件内容，仅网页预览需要 |
 
 当前版本已经移除 `-build-index`、`filesystem index` 和 `filesystem tree-index`。不要再把 `false` 作为布尔参数的独立位置参数传入。
 
@@ -135,7 +140,13 @@ golangtools filesystem serve \
   -path-root /data/new
 ```
 
-浏览、统计、搜索和复制路径不要求原始文件存在。只有“打开文件/打开文件夹”要求目标机路径可访问。快照不会复制原始文件内容。
+浏览、统计、搜索和复制路径不要求原始文件存在。只有“打开文件/打开文件夹”和网页文件预览要求目标机路径可访问。快照不会复制原始文件内容，预览是现读磁盘上的当前文件，所以扫描和 serve 不在同一台机器时预览会提示路径不存在（`-path-root` 只改路径映射，不会凭空造出文件）。
+
+在别的机器上需要预览时，文件内容接口默认拒绝非回环请求，需要显式放开：
+
+```bash
+golangtools filesystem serve -snapshot /path/to/snapshot.gti -listen 0.0.0.0:8080 -allow-remote-content
+```
 
 ## 8. 中断和错误
 
@@ -156,3 +167,6 @@ golangtools filesystem status -snapshot /path/to/snapshot.gti
 | 打开路径失败 | 检查 `-path-root`、文件是否存在及当前用户权限 |
 | 端口占用 | 使用 `-listen 127.0.0.1:18080` |
 | 搜索耗时较长 | 默认不生成搜索副本，任意子串搜索会扫描记录；目录浏览不受影响 |
+| 预览提示路径不存在 | GTI 不保存文件内容，预览现读磁盘；确认扫描和 serve 在同一台机器，或该文件未被删除 |
+| 远程访问预览返回 403 | 文件内容接口默认只接受回环请求，加 `-allow-remote-content` 显式放开 |
+| 网页显示「需重新扫描」 | 旧快照没有写入目录递归统计值，重新执行一次 `filesystem scan` |

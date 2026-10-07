@@ -329,6 +329,10 @@ func BuildFastIndex(ctx context.Context, snapshotDir string, progress func(FastI
 			Flags:     fastFlagDirectory,
 			Size:      binary.LittleEndian.Uint64(header[24:32]),
 			Allocated: binary.LittleEndian.Uint64(header[32:40]),
+			// 扫描器算好的递归统计值，写入位置见 scanner.go 的 writeDir。
+			// 目录记录本来就有这 16 个预留字节，读端早已按此读回，这里只是补齐写入。
+			FileCount: binary.LittleEndian.Uint64(header[40:48]),
+			DirCount:  binary.LittleEndian.Uint64(header[48:56]),
 		}
 		if uint32(index) != uint32(len(parentIndices)) {
 			_ = dirFile.Close()
@@ -848,10 +852,7 @@ func sortFastItems(items []listItem, sortValue string, allocatedKnown bool) {
 			}
 			return items[i].MTimeNS > items[j].MTimeNS
 		default:
-			left, right := items[i].AllocatedBytes, items[j].AllocatedBytes
-			if !allocatedKnown {
-				left, right = items[i].SizeBytes, items[j].SizeBytes
-			}
+			left, right := fastItemSize(items[i], allocatedKnown), fastItemSize(items[j], allocatedKnown)
 			if left == right {
 				if items[i].IsDir != items[j].IsDir {
 					return items[i].IsDir
@@ -861,6 +862,14 @@ func sortFastItems(items []listItem, sortValue string, allocatedKnown bool) {
 			return left > right
 		}
 	})
+}
+
+// 排序与「最大文件」统计统一走这个口径：实际占用不可用时回退到逻辑大小。
+func fastItemSize(item listItem, allocatedKnown bool) int64 {
+	if allocatedKnown {
+		return item.AllocatedBytes
+	}
+	return item.SizeBytes
 }
 
 func pageFastItems(items []listItem, limit, offset int) []listItem {
@@ -982,7 +991,13 @@ func (f *fastIndex) breadcrumbs(id uint64, root string) ([]map[string]any, error
 		if err != nil {
 			return nil, err
 		}
-		result = append(result, map[string]any{"id": int64(node.ID), "parent_id": parentIDFromNode(f, node), "name": name, "depth": len(result)})
+		// 面包屑顺带带上该目录自身的递归统计值，前端「当前目录概览」就能免掉额外请求。
+		// 旧快照的 FileCount/DirCount 恒为 0，调用方要按「不可用」而不是「空目录」处理。
+		result = append(result, map[string]any{
+			"id": int64(node.ID), "parent_id": parentIDFromNode(f, node), "name": name, "depth": len(result),
+			"size_bytes": int64(node.Size), "allocated_bytes": int64(node.Allocated),
+			"file_count": int64(node.FileCount), "dir_count": int64(node.DirCount),
+		})
 		index = node.Parent
 	}
 	for left, right := 0, len(result)-1; left < right; left, right = left+1, right-1 {

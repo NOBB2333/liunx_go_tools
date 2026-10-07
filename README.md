@@ -33,6 +33,14 @@ golangtools-windows-amd64.exe
 golangtools-windows-arm64.exe
 ```
 
+每个约 35MB。前端产物和网页预览所需的 Worker、WASM、字体都通过 `go:embed` 打进二进制，所以发行包是自包含的：任意一台机器上复制过去就能跑，不依赖 CDN，也不需要额外安装运行时。
+
+**前端产物不随源码提交**。`internal/filesystem/web/` 里只提交一个 `keep.txt` 占位文件，让 `go:embed` 在未构建前端时也能成立，其余内容全部由构建脚本生成——它们体积大，而且每改一次界面就会整体重写。所以：
+
+- 克隆后直接 `go build` / `go test` 能过，但那时二进制里没有网页界面，访问会返回一页「这个二进制里没有网页界面」的提示。
+- 要得到完整可用的二进制，跑 `./build.sh`、`.uild.ps1` 或 `make frontend` 再编译。发布流程本来就是这么走的。
+- `web/public/` 同理，是 Vite 插件在开发/构建时生成的预览器资源副本，已被忽略。
+
 ## 文件系统扫描
 
 先探测目标卷：
@@ -69,6 +77,10 @@ Windows 默认使用 `-backend auto`：本地 NTFS 优先走 MFT 顺序读取，
 
 打开 `http://127.0.0.1:8080/`。浏览器只分页读取当前目录和搜索结果，不加载完整目录树。
 
+页面左侧是目录浏览：面包屑、空间占用图、文件列表。**空间占用图可以折叠**，收起后列表会吃满整张卡片，整页不再滚动，只留列表一条滚动条。右侧分析栏给出当前目录的递归大小与条目数、当前目录最大的文件，以及整个快照的类型占用；每个面板都能单独折叠。
+
+文件列表每行的眼睛图标会在右侧打开预览抽屉，抽屉左边缘可拖动调整宽度。预览在浏览器内用 Worker 和 WASM 解析渲染，不上传数据，支持 Office、PDF、OFD、压缩包、Markdown、代码、图片、音视频等常见格式。预览读取的是磁盘上的当前文件而不是快照副本——GTI 只存元数据，所以扫描和 serve 要在同一台机器上。详见 [Web 查看器](docs/web-viewer.md)。
+
 快照是可复制的离线结果。迁移时只需要复制 `snapshot.gti`，再使用目标电脑对应的可执行文件运行：
 
 ```bash
@@ -78,7 +90,7 @@ Windows 默认使用 `-backend auto`：本地 NTFS 优先走 MFT 顺序读取，
   -listen 127.0.0.1:8080
 ```
 
-展示、空间统计、目录分页和路径文本不需要原始磁盘在线；如果原始目录在目标机被复制到了不同位置，使用 `-path-root` 做根路径映射即可让“打开本机文件管理器”使用新路径。快照不会把文件内容复制过去，也不会改变另一台电脑的文件权限。
+展示、空间统计、目录分页和路径文本不需要原始磁盘在线；如果原始目录在目标机被复制到了不同位置，使用 `-path-root` 做根路径映射即可让“打开本机文件管理器”使用新路径。快照不会把文件内容复制过去，也不会改变另一台电脑的文件权限，因此网页预览只在扫描与 serve 位于同一台机器时可用。
 
 扫描会生成两类日志：工具级日志在 `~/.golangtools/logs/`（可用 `GOLANGTOOLS_LOG_DIR` 覆盖），输出目录内还有 `run.log`。快照页面显示绝对路径、实际占用、逻辑大小、修改/创建/元数据变更时间，并提供复制路径和在本机文件管理器中打开的按钮。通过 `127.0.0.1` 使用时由 Go 后端调用系统文件管理器，不需要浏览器逐个目录授权。
 
@@ -105,7 +117,7 @@ Windows 默认使用 `-backend auto`：本地 NTFS 优先走 MFT 顺序读取，
 | 实际分配 | 约 712 GiB |
 | 受保护目录错误 | 222 |
 
-macOS TCC 拒绝访问的目录会写入 `errors.ndjson`，不会中断其余扫描。
+macOS TCC 拒绝访问的目录会写入快照的 errors 段，不会中断其余扫描，网页也能通过错误接口查看具体路径。
 
 ## 其它模块
 
@@ -173,15 +185,27 @@ SERVER_RECORD_ID
 
 ## 前端开发
 
+前端使用 Vue 3、TypeScript、Vue Router、Tailwind CSS、Vite 和 Lucide，源码全部是 `.ts` 与 `.vue`，位于 `web/src/`。构建产物流向 `internal/filesystem/web/`，再由 Go `embed` 编进二进制。
+
 ```bash
 cd web
 pnpm install --frozen-lockfile
-pnpm run dev
+pnpm run dev        # 开发服务器 5173，/api 反代到 127.0.0.1:8080
 pnpm run typecheck
-pnpm run build
+pnpm run build      # 生成到 internal/filesystem/web/
 ```
 
-前端使用 Vue 3、TypeScript、Vue Router、Tailwind CSS、Vite 和 Lucide。生产构建输出到 `internal/filesystem/web/`，通过 Go `embed` 编译进可执行文件。
+开发时另开一个终端运行 `filesystem serve`，`pnpm dev` 会把 `/api` 代理过去，这样改前端不用重复编译 Go 二进制。
+
+`pnpm run build` 会先执行 `prebuild`：清理 `internal/filesystem/web/` 中除 `keep.txt` 以外的内容。这一步是必要的——前端产物不入版本库，而 Vite 自带的 `emptyOutDir` 会连占位文件一起删掉，所以清目录交给脚本做（`emptyOutDir` 已关闭），既能保住占位文件，又不会让旧的哈希分块越积越多。
+
+**改了前端之后记得重新编译 Go 二进制**：产物是编译期嵌入的，只跑 `pnpm run build` 不会更新已经在跑的二进制。
+
+网页预览由 `@file-viewer/vue3` 配合 `@file-viewer/preset-standard` 提供，`@file-viewer/vite-plugin` 负责装配 renderer 并把 Worker/WASM/字体复制到产物里。选 `preset-standard` 而不是 `preset-all`，是为了避开 CAD 运行时的 AGPL-3.0 依赖和带水印的旧版 PPT 运行时。
+
+如果不需要预览功能，移除 `web/src/components/FilePreview.vue`、`PreviewDrawer.vue`、`EntryList.vue` 里的眼睛按钮、`server.go` 的 `handleContent`、`vite.config.ts` 里的插件和 `package.json` 里对应的依赖即可；去掉后发行包会小约 21MB。
+
+网页预览由 `@file-viewer/vue3` 配合 `@file-viewer/preset-standard` 提供，`@file-viewer/vite-plugin` 负责装配 renderer 并把 Worker/WASM/字体复制到产物里。选 `preset-standard` 而不是 `preset-all`，是为了避开 CAD 运行时的 AGPL-3.0 依赖和带水印的旧版 PPT 运行时。如果不需要预览，移除 `web/src/components/FilePreview.vue`、`PreviewDrawer.vue`、`EntryList.vue` 里的眼睛按钮、`server.go` 的 `handleContent`、`vite.config.ts` 里的插件和对应依赖即可。
 
 ## 文档
 

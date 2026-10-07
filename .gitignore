@@ -13,6 +13,12 @@ go-tool-result/
 dist/
 web/node_modules/
 web/package-lock.json
+# @file-viewer/vite-plugin 每次 dev/build 都会重新生成这份预览器资源
+web/public/
+# 前端构建产物不入库：体积大、每次改界面都会重写。只保留让 go:embed 成立的占位文件，
+# 其余用 ./build.sh、make frontend 或 cd web && pnpm run build 生成。
+internal/filesystem/web/*
+!internal/filesystem/web/keep.txt
 .DS_Store
 
 # Go 构建产物

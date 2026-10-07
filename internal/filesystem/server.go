@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -23,17 +24,21 @@ type ServerOptions struct {
 	PathRoot    string
 	Token       string
 	OpenPath    func(path string, isDir bool) error
+	// 默认只允许本机浏览器读取文件内容：这个端点会把磁盘上的原始字节发出去，
+	// 快照又常常是拷到别的机器上浏览的，所以放宽必须由使用者显式打开。
+	AllowRemoteContent bool
 }
 
 type Server struct {
-	snapshotDir  string
-	snapshotFile string
-	pathRoot     string
-	manifest     SnapshotManifest
-	fast         *fastIndex
-	token        string
-	static       http.Handler
-	openPath     func(path string, isDir bool) error
+	snapshotDir   string
+	snapshotFile  string
+	pathRoot      string
+	manifest      SnapshotManifest
+	fast          *fastIndex
+	token         string
+	static        http.Handler
+	openPath      func(path string, isDir bool) error
+	remoteContent bool
 }
 
 type listItem struct {
@@ -83,14 +88,15 @@ func OpenServer(opt ServerOptions) (*Server, error) {
 		return nil, err
 	}
 	return &Server{
-		snapshotDir:  snapshotDir,
-		snapshotFile: snapshotFile,
-		pathRoot:     strings.TrimSpace(opt.PathRoot),
-		manifest:     manifest,
-		fast:         fast,
-		token:        opt.Token,
-		static:       static,
-		openPath:     opt.OpenPath,
+		snapshotDir:   snapshotDir,
+		snapshotFile:  snapshotFile,
+		pathRoot:      strings.TrimSpace(opt.PathRoot),
+		manifest:      manifest,
+		fast:          fast,
+		token:         opt.Token,
+		static:        static,
+		openPath:      opt.OpenPath,
+		remoteContent: opt.AllowRemoteContent,
 	}, nil
 }
 
@@ -188,6 +194,8 @@ func (s *Server) handleAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleErrors(w, r)
 	case path == "/api/v1/snapshots/active/open":
 		s.handleOpen(w, r)
+	case strings.HasPrefix(path, "/api/v1/snapshots/active/content/"):
+		s.handleContent(w, r, path)
 	case strings.HasPrefix(path, "/api/v1/snapshots/active/directories/") && strings.HasSuffix(path, "/children"):
 		s.handleChildren(w, r, path)
 	case strings.HasPrefix(path, "/api/v1/snapshots/active/directories/"):
@@ -259,6 +267,148 @@ func (s *Server) handleOpen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeError(w, http.StatusNotFound, "item_not_found", "snapshot.gti is not available")
+}
+
+// 标准库的扩展名表对源码文件要么没有条目，要么给错（.ts 会命中 video/mp2t，
+// .rs 会命中 application/rls-services+xml），所以这些类型必须先查这张表。
+var textContentTypes = map[string]string{
+	".md": "text/markdown; charset=utf-8", ".markdown": "text/markdown; charset=utf-8",
+	".go": "text/x-go; charset=utf-8", ".rs": "text/x-rust; charset=utf-8",
+	".py": "text/x-python; charset=utf-8", ".rb": "text/x-ruby; charset=utf-8",
+	".ts": "text/typescript; charset=utf-8", ".tsx": "text/typescript; charset=utf-8",
+	".jsx": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
+	".cjs": "text/javascript; charset=utf-8", ".vue": "text/plain; charset=utf-8",
+	".yaml": "text/yaml; charset=utf-8", ".yml": "text/yaml; charset=utf-8",
+	".toml": "text/plain; charset=utf-8", ".ini": "text/plain; charset=utf-8",
+	".conf": "text/plain; charset=utf-8", ".env": "text/plain; charset=utf-8",
+	".sql": "text/plain; charset=utf-8", ".mod": "text/plain; charset=utf-8",
+	".sum": "text/plain; charset=utf-8", ".lock": "text/plain; charset=utf-8",
+	".gradle": "text/plain; charset=utf-8", ".properties": "text/plain; charset=utf-8",
+	".c": "text/x-c; charset=utf-8", ".h": "text/x-c; charset=utf-8",
+	".cc": "text/x-c++; charset=utf-8", ".cpp": "text/x-c++; charset=utf-8",
+	".hpp": "text/x-c++; charset=utf-8", ".java": "text/x-java; charset=utf-8",
+	".kt": "text/x-kotlin; charset=utf-8", ".swift": "text/x-swift; charset=utf-8",
+	".php": "text/x-php; charset=utf-8", ".lua": "text/x-lua; charset=utf-8",
+	".diff": "text/x-diff; charset=utf-8", ".patch": "text/x-diff; charset=utf-8",
+}
+
+func contentTypesFor(name string) string {
+	ext := strings.ToLower(filepath.Ext(name))
+	if contentType, ok := textContentTypes[ext]; ok {
+		return contentType
+	}
+	return mime.TypeByExtension(ext)
+}
+
+// rfc5987Encode 按 RFC 5987 的 ext-value 规则百分号编码。
+// 中文文件名必须走这个，直接塞进 filename= 会变成乱码或被截断。
+func rfc5987Encode(value string) string {
+	const attrChars = "!#$&+-.^_`|~"
+	var b strings.Builder
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || strings.IndexByte(attrChars, c) >= 0 {
+			b.WriteByte(c)
+			continue
+		}
+		fmt.Fprintf(&b, "%%%02X", c)
+	}
+	return b.String()
+}
+
+// ascii fallback 名，供不认识 filename* 的老客户端使用。
+func asciiFilename(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		if r < 0x20 || r > 0x7e || r == '"' || r == '\\' {
+			b.WriteByte('_')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	if b.Len() == 0 {
+		return "download"
+	}
+	return b.String()
+}
+
+// handleContent 直接把索引指向的那个文件的原字节发出去，供前端预览用。
+// 浏览器无法自己读 file:// 路径，所以预览必须走这里。
+func (s *Server) handleContent(w http.ResponseWriter, r *http.Request, path string) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "GET or HEAD is required")
+		return
+	}
+	if !s.remoteContent && !isLoopbackRequest(r) {
+		writeError(w, http.StatusForbidden, "local_access_required", "reading file content requires a loopback browser connection")
+		return
+	}
+	// 支持两种形式：/content/{id} 和 /content/{id}/{文件名}。
+	// 末尾的文件名只是给浏览器和预览器识别格式用的（<video> / <img> 会看扩展名），
+	// 服务端完全不使用它，路径一律由索引里的 id 解析，所以不存在路径穿越问题。
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	contentIndex := -1
+	for i, part := range parts {
+		if part == "content" {
+			contentIndex = i
+			break
+		}
+	}
+	if contentIndex < 0 || contentIndex+1 >= len(parts) {
+		writeError(w, http.StatusBadRequest, "invalid_item", "a valid indexed file id is required")
+		return
+	}
+	id, err := strconv.ParseInt(parts[contentIndex+1], 10, 64)
+	if err != nil || id < 1 {
+		writeError(w, http.StatusBadRequest, "invalid_item", "a valid indexed file id is required")
+		return
+	}
+	if s.fast == nil {
+		writeError(w, http.StatusNotFound, "item_not_found", "snapshot.gti is not available")
+		return
+	}
+	// 注意：文件 id 与目录 id 共用一套数字空间（见 indexForItem），同一个数字可能
+	// 既是某个目录又是某个文件。这个端点按约定只解释文件 id，调用方必须只传文件列表里
+	// 的 id；传目录 id 只会取到同号文件，不会越出快照索引的范围。
+	index, ok := s.fast.indexForItem(id, false)
+	if !ok {
+		writeError(w, http.StatusNotFound, "item_not_found", "item is not an indexed file")
+		return
+	}
+	item, err := s.fast.nodeItem(index)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "tree_read_failed", err.Error())
+		return
+	}
+	if err := s.fast.decoratePath(&item, s.pathRootValue()); err != nil {
+		writeError(w, http.StatusInternalServerError, "path_query_failed", err.Error())
+		return
+	}
+	file, err := os.Open(item.Path)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "path_not_found", fmt.Sprintf("path is no longer available: %s", item.Path))
+		return
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "stat_failed", err.Error())
+		return
+	}
+
+	contentType := contentTypesFor(item.Name)
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=\"%s\"; filename*=UTF-8''%s", asciiFilename(item.Name), rfc5987Encode(item.Name)))
+	// nosniff + sandbox：即使有人把这个地址直接贴进地址栏打开，
+	// 磁盘上的 HTML/SVG 也不能在同源执行脚本、拿 cookie 去调 /open 之类的接口。
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "sandbox; default-src 'none'")
+	w.Header().Set("Cache-Control", "private, max-age=60")
+	// ServeContent 自带 Range 支持，视频拖进度条和 PDF 分片加载都靠它。
+	http.ServeContent(w, r, item.Name, info.ModTime(), file)
 }
 
 func isLoopbackRequest(r *http.Request) bool {

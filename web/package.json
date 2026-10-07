@@ -4,16 +4,23 @@
   "type": "module",
   "packageManager": "pnpm@12.6.0",
   "scripts": {
+    "clean-embed": "node scripts/clean-embed.mjs",
+    "prebuild": "pnpm run clean-embed",
     "dev": "vite",
     "build": "vite build",
     "typecheck": "vue-tsc --noEmit"
   },
   "dependencies": {
+    "@file-viewer/core": "^3.1.2",
+    "@file-viewer/preset-standard": "^3.1.2",
+    "@file-viewer/vue3": "^3.1.2",
     "lucide-vue-next": "^0.577.0",
     "vue": "^3.5.18",
     "vue-router": "^4.5.1"
   },
   "devDependencies": {
+    "@file-viewer/assets-standard": "^3.1.2",
+    "@file-viewer/vite-plugin": "^3.1.2",
     "@tailwindcss/vite": "^4.1.13",
     "@vitejs/plugin-vue": "^6.0.1",
     "tailwindcss": "^4.1.13",
