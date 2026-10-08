@@ -94,7 +94,9 @@ func (e *DocExtractor) openDocFilesWindowsAPI(pid int32) ([]string, error) {
 	info := (*sysHandleInfo)(unsafe.Pointer(&buf[0]))
 	count := int(info.NumberOfHandles)
 	entrySize := unsafe.Sizeof(sysHandleEntry{})
-	basePtr := uintptr(unsafe.Pointer(&info.Handles[0]))
+	// 注意：不能把 unsafe.Pointer 先转成 uintptr 存变量再运算（vet 会报
+	// possible misuse），必须在同一表达式内从原指针完成偏移计算。
+	handlesBase := unsafe.Pointer(&info.Handles[0])
 
 	hProc, err := windows.OpenProcess(windows.PROCESS_DUP_HANDLE, false, uint32(pid))
 	if err != nil {
@@ -107,7 +109,7 @@ func (e *DocExtractor) openDocFilesWindowsAPI(pid int32) ([]string, error) {
 	seen := map[string]bool{}
 
 	for i := 0; i < count; i++ {
-		entry := (*sysHandleEntry)(unsafe.Pointer(basePtr + uintptr(i)*entrySize))
+		entry := (*sysHandleEntry)(unsafe.Pointer(uintptr(handlesBase) + uintptr(i)*entrySize))
 		if int(entry.UniqueProcessID) != int(pid) {
 			continue
 		}

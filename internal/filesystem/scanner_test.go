@@ -5,12 +5,24 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
+// skipOnWindows 说明：快速扫描在 Windows 上使用 windows-mft 后端，
+// 目录 ID 来自真实 MFT 记录号、树模式会带 NTFS 分配量信息，与 Unix 后端
+// 语义不同；且部分测试使用了 Windows 文件名非法字符（如 |）。相关断言
+// 仅对 Unix 后端有意义，Windows 上一律跳过。
+func skipOnWindows(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fast scanner tests assume Unix backend semantics; windows-mft backend differs")
+	}
+}
+
 func TestFastScannerAggregatesNestedDirectories(t *testing.T) {
+	skipOnWindows(t)
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "a", "b"), 0755); err != nil {
 		t.Fatal(err)
@@ -76,6 +88,7 @@ func TestFastScannerAggregatesNestedDirectories(t *testing.T) {
 }
 
 func TestFastScannerTreeModeAvoidsMetadataTotals(t *testing.T) {
+	skipOnWindows(t)
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "file"), []byte("payload"), 0644); err != nil {
 		t.Fatal(err)
@@ -118,6 +131,8 @@ func TestFastScannerProgressDoesNotCancelCompletedScan(t *testing.T) {
 }
 
 func TestFastScannerHandlesWideDirectoryTrees(t *testing.T) {
+	// 子目录名会用到 '|' 等字符（'a'+63），Windows 文件名不允许
+	skipOnWindows(t)
 	root := t.TempDir()
 	for top := 0; top < 8; top++ {
 		for child := 0; child < 64; child++ {
@@ -153,6 +168,7 @@ func TestFastScannerHandlesWideDirectoryTrees(t *testing.T) {
 }
 
 func TestProbeDisk(t *testing.T) {
+	skipOnWindows(t) // ProbeDisk 未在 Windows 上实现
 	probe, err := ProbeDisk(t.TempDir())
 	if err != nil {
 		t.Fatalf("probe: %v", err)

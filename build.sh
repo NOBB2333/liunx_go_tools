@@ -56,12 +56,14 @@ build_one() {
     cgo_flag=1
   fi
 
+  # 注意：-o 必须用相对路径。Git Bash 下 DIST_DIR 是 /d/xxx 形式，
+  # Windows 版 go.exe 会把它解释成「当前盘符根目录」下的路径，产物会写飞。
   GOOS="${goos}" GOARCH="${goarch}" CGO_ENABLED="${cgo_flag}" \
-    go build -trimpath -ldflags="-s -w" -o "${DIST_DIR}/${output_name}" .
+    go build -trimpath -ldflags="-s -w" -o "dist/${output_name}" .
 
   # native darwin 构建：用 ad-hoc 签名注入 debugger entitlement，使 task_for_pid 可用
   if [[ "${goos}" == "${host_os}" && "${goarch}" == "${host_arch}" && "${goos}" == "darwin" ]]; then
-    codesign -s - --entitlements "${ROOT_DIR}/debugger.entitlements.plist" --force "${DIST_DIR}/${output_name}" 2>&1 || true
+    codesign -s - --entitlements "${ROOT_DIR}/debugger.entitlements.plist" --force "dist/${output_name}" 2>&1 || true
   fi
 }
 
@@ -82,15 +84,31 @@ if [[ -d "${ROOT_DIR}/Handle" ]]; then
   cp -R "${ROOT_DIR}/Handle/." "${DIST_DIR}/Handle/"
 fi
 
+ARTIFACTS=(
+  golangtools-darwin-amd64
+  golangtools-darwin-arm64
+  golangtools-linux-amd64
+  golangtools-linux-arm64
+  golangtools-windows-amd64.exe
+  golangtools-windows-arm64.exe
+)
+
+# 先校验产物齐全，避免"构建成功但文件不在"这类问题被一路带到最后
+for artifact in "${ARTIFACTS[@]}"; do
+  if [[ ! -f "${DIST_DIR}/${artifact}" ]]; then
+    echo "构建产物缺失: ${DIST_DIR}/${artifact}" >&2
+    exit 1
+  fi
+done
+
 (
   cd "${DIST_DIR}"
-  shasum -a 256 \
-    golangtools-darwin-amd64 \
-    golangtools-darwin-arm64 \
-    golangtools-linux-amd64 \
-    golangtools-linux-arm64 \
-    golangtools-windows-amd64.exe \
-    golangtools-windows-arm64.exe > SHA256SUMS
+  # 优先用 sha256sum（Git Bash/精简 Linux 无 shasum）
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "${ARTIFACTS[@]}" > SHA256SUMS
+  else
+    shasum -a 256 "${ARTIFACTS[@]}" > SHA256SUMS
+  fi
 )
 
 find "${DIST_DIR}" -name .DS_Store -type f -delete

@@ -2,6 +2,8 @@ package filestore
 
 import (
 	"context"
+	"fmt"
+	"path/filepath"
 	"testing"
 )
 
@@ -31,7 +33,9 @@ func TestQueryCopyCommandUsesConfiguredRootAndQuotesPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := `cp -- '/srv/files/reports/a file.txt' 'result'"'"'s copy.txt'`
+	// 源路径由 filepath.Join 拼接，期望值需跟随平台分隔符（Windows 下为反斜杠）
+	wantSource := filepath.Join("/srv/files", filepath.FromSlash("reports/a file.txt"))
+	want := fmt.Sprintf("cp -- '%s' 'result'\"'\"'s copy.txt'", wantSource)
 	if command != want {
 		t.Fatalf("unexpected command: got %q want %q", command, want)
 	}
