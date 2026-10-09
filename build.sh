@@ -7,7 +7,16 @@ DIST_DIR="${ROOT_DIR}/dist"
 APP_NAME="golangtools"
 
 cd "${ROOT_DIR}"
-rm -rf "${DIST_DIR}"
+
+# 清空 dist 并**不总是**能成功：Windows 上目录被句柄占用、只读挂载、
+# 或者环境把删除重定向到回收站而回收站不可用（沙箱/受限账号）时，
+# rm 会失败。这不该让整个构建挂掉——产物本来就会被同名覆盖，
+# 所以这里降级为"尽力清空 + 警告残留"，后面还会校验 6 个产物是否齐全。
+if ! rm -rf "${DIST_DIR}" 2>/dev/null; then
+  if [ -n "$(ls -A "${DIST_DIR}" 2>/dev/null | grep -v '^$' || true)" ]; then
+    echo "警告: 无法清空 ${DIST_DIR}（删除被拒绝）。同名产物会被覆盖，但可能残留旧文件。" >&2
+  fi
+fi
 mkdir -p "${DIST_DIR}"
 
 require_command() {

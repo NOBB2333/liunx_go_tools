@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/json"
@@ -159,6 +160,17 @@ func runFilesystem(args []string) error {
 		if err := printJSON(summary); err != nil {
 			return err
 		}
+		// 扫描结果为空时最容易误判"参数写错了"：直接把错误明细和索引位置打出来。
+		if summary.Errors > 0 {
+			errorPath := filepath.Join(outputDir, "errors.ndjson")
+			fmt.Printf("warn: 扫描记录 %d 个错误，明细见 %s\n", summary.Errors, errorPath)
+			for _, sample := range readScanErrorSamples(errorPath, 3) {
+				fmt.Printf("  %s -> %s\n", sample[0], sample[1])
+			}
+		}
+		if summary.Files == 0 && summary.Directories == 0 {
+			fmt.Println("warn: 根目录下没有枚举到任何条目，请确认 -root 指向可读目录；可用 -backend portable 交叉验证一次")
+		}
 		if activeLogger != nil {
 			activeLogger.Phase("tree", "生成单文件快速快照", map[string]any{"snapshot_dir": outputDir})
 		}
@@ -251,6 +263,29 @@ func printJSON(value any) error {
 	}
 	fmt.Println(string(data))
 	return nil
+}
+
+// readScanErrorSamples 读取快照目录里 errors.ndjson 的前 limit 条记录。
+// 扫描结果为空（files=0）时，这几条就是唯一能定位原因的线索。
+func readScanErrorSamples(path string, limit int) [][2]string {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+	var samples [][2]string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() && len(samples) < limit {
+		var item struct {
+			Path  string `json:"path"`
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(scanner.Bytes(), &item) != nil {
+			continue
+		}
+		samples = append(samples, [2]string{item.Path, item.Error})
+	}
+	return samples
 }
 
 func randomToken() (string, error) {

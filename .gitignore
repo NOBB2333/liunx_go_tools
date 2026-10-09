@@ -25,6 +25,7 @@ internal/filesystem/web/*
 bin/
 out/
 .gocache
+.stale-20261008
 
 # IDE
 .vscode/

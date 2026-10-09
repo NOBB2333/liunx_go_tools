@@ -311,7 +311,12 @@ func (s *FastScanner) Scan(ctx context.Context, opt FastScanOptions) (FastScanSu
 		opt.Backend = FastScanBackendAuto
 	}
 	switch opt.Backend {
-	case FastScanBackendAuto, FastScanBackendWindowsMFT, FastScanBackendWindowsNative, FastScanBackendPortable:
+	case FastScanBackendAuto, FastScanBackendPortable:
+	case FastScanBackendWindowsMFT, FastScanBackendWindowsNative:
+		// 显式报错，别像以前那样静默走原生实现
+		if runtime.GOOS != "windows" {
+			return FastScanSummary{}, fmt.Errorf("扫描后端 %s 仅适用于 Windows（当前 %s），请改用 auto 或 portable", opt.Backend, runtime.GOOS)
+		}
 	default:
 		return FastScanSummary{}, fmt.Errorf("unsupported scan backend: %s", opt.Backend)
 	}
@@ -600,7 +605,9 @@ func (s *FastScanner) scanDirectory(
 	dirsSeen, filesSeen, logicalBytes, allocatedBytes, errorCount *atomic.Uint64,
 	aggregator *fastAggregator,
 ) (uint64, uint64, uint64) {
-	if runtime.GOOS == "windows" && opt.Backend == FastScanBackendPortable {
+	// portable 在所有平台都生效：老逻辑只在 Windows 上认这个值，Linux/macOS 上传了
+	// -backend portable 会被静默忽略（仍然走原生实现），等于没有回退手段。
+	if opt.Backend == FastScanBackendPortable {
 		return scanDirectoryPortable(ctx, task, opt, nextID, pending, jobs, fileRecords, errorRecords, dirsSeen, filesSeen, logicalBytes, allocatedBytes, errorCount, aggregator)
 	}
 	return scanDirectoryNative(ctx, task, opt, nextID, pending, jobs, fileRecords, errorRecords, dirsSeen, filesSeen, logicalBytes, allocatedBytes, errorCount, aggregator)
