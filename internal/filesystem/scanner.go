@@ -88,6 +88,7 @@ type FastScanSummary struct {
 	Duration         time.Duration `json:"duration_ns"`
 	EntriesPerSecond float64       `json:"entries_per_second"`
 	Complete         bool          `json:"complete"`
+	Volume           *VolumeSpace  `json:"volume,omitempty"`
 }
 
 type fastDirTask struct {
@@ -531,6 +532,8 @@ func (s *FastScanner) Scan(ctx context.Context, opt FastScanOptions) (FastScanSu
 		summary.EntriesPerSecond = float64(summary.Files+summary.Directories) / summary.Duration.Seconds()
 	}
 	summary.Complete = true
+	// A failed capacity probe must not make an otherwise usable scan fail.
+	summary.Volume, _ = readVolumeSpace(root)
 	manifest, err := json.MarshalIndent(summary, "", "  ")
 	if err != nil {
 		return summary, err

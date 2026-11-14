@@ -484,6 +484,7 @@ func scanWindowsMFT(ctx context.Context, opt FastScanOptions, root string) (Fast
 		directoryCount = selectedDirs - 1 // the root itself is represented as id 1
 	}
 	summary := FastScanSummary{SchemaVersion: snapshotSchemaVersion, Root: root, OutputDir: opt.OutputDir, Metadata: string(opt.Metadata), ScannerBackend: string(FastScanBackendWindowsMFT), AllocatedKnown: true, AllocationSource: "ntfs-mft", Workers: 1, Files: selectedFiles, Directories: directoryCount, LogicalBytes: logicalTotal, AllocatedBytes: allocatedTotal, StartedAt: started, FinishedAt: finished, Duration: finished.Sub(started), Complete: true}
+	summary.Volume, _ = readVolumeSpace(root)
 	if summary.Duration > 0 {
 		summary.EntriesPerSecond = float64(summary.Files+summary.Directories) / summary.Duration.Seconds()
 	}

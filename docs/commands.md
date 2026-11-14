@@ -7,6 +7,7 @@ golangtools filesystem probe -path <mount-or-directory>
 golangtools filesystem scan -root <source-directory> [options]
 golangtools filesystem serve -snapshot <snapshot.gti-or-directory> [options]
 golangtools filesystem status -snapshot <snapshot.gti-or-directory>
+golangtools filesystem inspect -snapshot <snapshot.gti-or-directory> [options]
 ```
 
 旧的 `filesystem index`、`filesystem tree-index` 和 `-build-index` 已移除。扫描完成后不会再有第二个 SQLite 索引阶段。
@@ -124,6 +125,18 @@ golangtools filesystem status -snapshot /data/copied/snapshot.gti
 ```
 
 状态输出包括扫描 manifest、GTI 文件路径、文件大小和是否已发布。
+
+## 给 AI 和脚本查询快照
+
+`filesystem inspect` 不启动服务，直接从已发布的快照读取分页 JSON，可按目录、大小和名称查询：
+
+```bash
+"$BIN" filesystem inspect -snapshot "$SNAPSHOT" -view overview
+"$BIN" filesystem inspect -snapshot "$SNAPSHOT" -view largest -kind directories -query node_modules
+"$BIN" filesystem inspect -snapshot "$SNAPSHOT" -view children -directory-id 123
+```
+
+目录 ID 必须替换为查询结果中的实际值。字段、大小口径、分页、示例及可复制的 AI 提示词见 [AI 磁盘快照分析](ai-disk-analysis.md)。
 
 ## 失败和中断
 

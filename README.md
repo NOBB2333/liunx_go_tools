@@ -35,6 +35,14 @@ golangtools-windows-arm64.exe
 
 每个约 35MB。前端产物和网页预览所需的 Worker、WASM、字体都通过 `go:embed` 打进二进制，所以发行包是自包含的：任意一台机器上复制过去就能跑，不依赖 CDN，也不需要额外安装运行时。
 
+## GitHub Release 发布
+
+在 GitHub 仓库的 **Releases → Draft a new release** 中，选择当前 `main` 提交并创建版本标签，例如 `v1.0`，填写说明后点击 **Publish release**。发布事件会自动执行类型检查、Go 测试与跨平台打包，将 6 个压缩包及 `SHA256SUMS` 上传到该 Release。普通提交、推送或仅推送标签都不会启动发布工作流；预发布的版本也会在发布时打包。
+
+macOS 和 Linux 下载对应架构的 `.tar.gz`，Windows 下载对应架构的 `.zip`。解压后可直接在解压目录运行其中的 `golangtools-*` 可执行文件，压缩包同时包含 README 和文档。macOS 二进制使用临时签名以支持调试权限，不包含 Apple Developer ID 签名或公证。
+
+发布流程在 [Actions](https://github.com/NOBB2333/liunx_go_tools/actions) 中查看。全部任务成功后资源才会上传；若发布流程失败，可查看失败日志，修复问题后重新运行该工作流。
+
 **前端产物不随源码提交**。`internal/filesystem/web/` 里只提交一个 `keep.txt` 占位文件，让 `go:embed` 在未构建前端时也能成立，其余内容全部由构建脚本生成——它们体积大，而且每改一次界面就会整体重写。所以：
 
 - 克隆后直接 `go build` / `go test` 能过，但那时二进制里没有网页界面，访问会返回一页「这个二进制里没有网页界面」的提示。
@@ -59,7 +67,7 @@ golangtools-windows-arm64.exe
   -metadata basic
 ```
 
-`basic` 会读取文件大小、分配块、mtime、ctime、birthtime、inode 和 mode，用于空间分析。只需要文件名和目录结构时可使用 `-metadata tree`，它会跳过文件元数据读取。页面默认展示实际分配空间，同时保留逻辑大小；稀疏文件、APFS clone、硬链接会让逻辑大小重复计数，这是正常现象。
+`basic` 会读取文件大小、分配块、mtime、ctime、birthtime、inode 和 mode，用于空间分析。只需要文件名和目录结构时可使用 `-metadata tree`，它会跳过文件元数据读取。页面以十进制 GB 显示扫描范围内的文件分配空间和逻辑大小；文件统计不等于整个磁盘的已用空间，稀疏文件、硬链接和 APFS clone 也可能造成差异。新快照记录扫描路径所在文件系统的总容量和可用空间；读取失败会在页面显示异常路径。
 
 Windows 默认使用 `-backend auto`：本地 NTFS 优先走 MFT 顺序读取，权限或卷类型不满足时回退到 Win32 原生枚举。可用 `-backend windows-mft` 强制 MFT，或用 `-backend windows-native` 做回退路径测试。原生回退没有逐文件 NTFS 分配块信息，会在 manifest 中标记 `allocated_bytes_known=false`，查看器会使用逻辑大小，不会把 0 显示成真实占用。
 
@@ -164,6 +172,8 @@ SNAPSHOT="$HOME/golangtools-snapshot-$(date +%Y%m%d-%H%M%S)"
 ```
 
 详细阶段、日志、并发起点和旧快照兼容说明见 [本地运行手册](docs/local-runbook.md)。
+
+AI 助手也可以直接用 `filesystem inspect -snapshot /path/to/snapshot.gti` 查询结构化 JSON，再按大小、目录或名称检索，无需启动网页。完整查询方式和可复制的新会话提示词见 [AI 磁盘快照分析](docs/ai-disk-analysis.md)。
 
 跨平台完整使用方式、Windows `scan/index/serve` 示例、快照路径区别和常见错误见 [文件系统扫描模块使用指南](docs/filesystem-user-guide.md)。
 

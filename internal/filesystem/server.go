@@ -430,6 +430,14 @@ func (s *Server) handleSummary(w http.ResponseWriter) {
 	if s.pathRoot != "" {
 		data["path_root"] = s.pathRoot
 	}
+	// Older snapshots have no volume statistics. If their path exists here,
+	// expose current local data separately rather than presenting it as part
+	// of the historical or potentially copied snapshot.
+	if s.manifest.Volume == nil {
+		if volume, err := readVolumeSpace(s.pathRootValue()); err == nil {
+			data["local_volume"] = volume
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"data": data, "meta": map[string]any{}})
 }
 

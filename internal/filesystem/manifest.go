@@ -12,24 +12,25 @@ import (
 // SnapshotManifest is embedded in snapshot.gti and is the stable metadata
 // contract shared by the scanner, container reader and HTTP API.
 type SnapshotManifest struct {
-	SchemaVersion    int       `json:"schema_version,omitempty"`
-	Root             string    `json:"root"`
-	OutputDir        string    `json:"output_dir"`
-	Metadata         string    `json:"metadata"`
-	ScannerBackend   string    `json:"scanner_backend,omitempty"`
-	AllocatedKnown   bool      `json:"allocated_bytes_known"`
-	AllocationSource string    `json:"allocation_source,omitempty"`
-	Workers          int       `json:"workers"`
-	Files            uint64    `json:"files"`
-	Directories      uint64    `json:"directories"`
-	LogicalBytes     uint64    `json:"logical_bytes"`
-	AllocatedBytes   uint64    `json:"allocated_bytes"`
-	Errors           uint64    `json:"errors"`
-	StartedAt        time.Time `json:"started_at"`
-	FinishedAt       time.Time `json:"finished_at"`
-	Duration         int64     `json:"duration_ns"`
-	EntriesPerSecond float64   `json:"entries_per_second"`
-	Complete         bool      `json:"complete"`
+	SchemaVersion    int          `json:"schema_version,omitempty"`
+	Root             string       `json:"root"`
+	OutputDir        string       `json:"output_dir"`
+	Metadata         string       `json:"metadata"`
+	ScannerBackend   string       `json:"scanner_backend,omitempty"`
+	AllocatedKnown   bool         `json:"allocated_bytes_known"`
+	AllocationSource string       `json:"allocation_source,omitempty"`
+	Workers          int          `json:"workers"`
+	Files            uint64       `json:"files"`
+	Directories      uint64       `json:"directories"`
+	LogicalBytes     uint64       `json:"logical_bytes"`
+	AllocatedBytes   uint64       `json:"allocated_bytes"`
+	Errors           uint64       `json:"errors"`
+	StartedAt        time.Time    `json:"started_at"`
+	FinishedAt       time.Time    `json:"finished_at"`
+	Duration         int64        `json:"duration_ns"`
+	EntriesPerSecond float64      `json:"entries_per_second"`
+	Complete         bool         `json:"complete"`
+	Volume           *VolumeSpace `json:"volume,omitempty"`
 }
 
 func ReadManifest(snapshot string) (SnapshotManifest, error) {

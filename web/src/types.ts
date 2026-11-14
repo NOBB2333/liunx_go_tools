@@ -1,3 +1,11 @@
+export type VolumeSpace = {
+  path: string
+  total_bytes: number
+  available_bytes: number
+  used_bytes: number
+  captured_at: string
+}
+
 export type Manifest = {
   root: string
   scanner_backend?: string
@@ -11,6 +19,7 @@ export type Manifest = {
   entries_per_second: number
   errors: number
   complete: boolean
+  volume?: VolumeSpace
 }
 
 export type Item = {
@@ -65,6 +74,7 @@ export type Summary = {
   indexed_directories: number
   snapshot_file?: string
   path_root?: string
+  local_volume?: VolumeSpace
 }
 
 export type ExtensionStat = {

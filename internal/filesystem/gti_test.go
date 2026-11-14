@@ -33,6 +33,14 @@ func TestPackFastSnapshotProducesPortableSingleFile(t *testing.T) {
 			t.Fatalf("legacy file remains: %s", name)
 		}
 	}
+	manifest, err := ReadManifest(snapshot)
+	if err != nil {
+		t.Fatalf("read packed manifest: %v", err)
+	}
+	if manifest.Volume == nil || manifest.Volume.Path != root || manifest.Volume.TotalBytes == 0 ||
+		manifest.Volume.AvailableBytes+manifest.Volume.UsedBytes != manifest.Volume.TotalBytes {
+		t.Fatalf("packed snapshot lost scan-time volume data: %+v", manifest.Volume)
+	}
 	server, err := OpenServer(ServerOptions{SnapshotDir: snapshot})
 	if err != nil {
 		t.Fatal(err)

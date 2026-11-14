@@ -25,6 +25,11 @@ export async function getChildren(id: number, sort: string, offset: number, limi
   return { items: payload.data, meta: payload.meta as PageMeta }
 }
 
+export async function getScanErrors(offset: number, limit = 20): Promise<Page<ScanError>> {
+  const payload = await request<ScanError[]>(`/api/v1/snapshots/active/errors?limit=${limit}&offset=${offset}`)
+  return { items: payload.data, meta: payload.meta as PageMeta }
+}
+
 export async function searchFiles(query: string, offset: number, limit = 100): Promise<Page<Item>> {
   const payload = await request<Item[]>(`/api/v1/snapshots/active/search?q=${encodeURIComponent(query)}&limit=${limit}&offset=${offset}`)
   return { items: payload.data, meta: payload.meta as PageMeta }
@@ -65,8 +70,8 @@ export function formatBytes(value: number): string {
   const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
   let size = value
   let unit = 0
-  while (size >= 1024 && unit < units.length - 1) {
-    size /= 1024
+  while (size >= 1000 && unit < units.length - 1) {
+    size /= 1000
     unit += 1
   }
   return `${size.toFixed(size >= 100 ? 0 : 1)} ${units[unit]}`

@@ -89,7 +89,7 @@ func Run(args []string) error {
 
 func runFilesystem(args []string) error {
 	if len(args) == 0 {
-		return errors.New("filesystem subcommand is required: probe, scan, serve, or status")
+		return errors.New("filesystem subcommand is required: probe, scan, serve, status, or inspect")
 	}
 
 	switch args[0] {
@@ -229,6 +229,36 @@ func runFilesystem(args []string) error {
 		ctx, cancel := signalContext()
 		defer cancel()
 		return server.Serve(ctx, *listen)
+
+	case "inspect":
+		fs := flag.NewFlagSet("filesystem inspect", flag.ContinueOnError)
+		snapshot := fs.String("snapshot", "", "snapshot.gti file or containing directory")
+		view := fs.String("view", "overview", "query view: overview, children, largest, extensions, or errors")
+		kind := fs.String("kind", "all", "entry type for children/largest: all, files, or directories")
+		query := fs.String("query", "", "case-insensitive entry-name substring for children/largest")
+		directoryID := fs.Uint64("directory-id", 1, "directory ID defining the query scope; root is 1")
+		minBytes := fs.Uint64("min-bytes", 0, "minimum size in bytes using the snapshot's available size metric")
+		limit := fs.Int("limit", 20, "maximum results per page, 1..500")
+		offset := fs.Int("offset", 0, "results to skip, 0..10000")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if *limit < 1 || *limit > 500 {
+			return errors.New("-limit must be between 1 and 500")
+		}
+		if *directoryID == 0 {
+			return errors.New("-directory-id must be at least 1")
+		}
+		ctx, cancel := signalContext()
+		defer cancel()
+		result, err := filesystem.InspectSnapshot(ctx, filesystem.InspectOptions{
+			Snapshot: *snapshot, View: *view, Kind: *kind, Query: *query,
+			DirectoryID: *directoryID, MinBytes: *minBytes, Limit: *limit, Offset: *offset,
+		})
+		if err != nil {
+			return err
+		}
+		return printJSON(result)
 
 	case "status":
 		fs := flag.NewFlagSet("filesystem status", flag.ContinueOnError)
@@ -937,6 +967,7 @@ func printUsage() {
 	fmt.Println("  filesystem scan -root <source-directory> [-output snapshot-dir] [-workers N] [-metadata basic|tree] [-backend auto|windows-mft|windows-native|portable] [-progress-interval 2s]")
 	fmt.Println("  filesystem serve -snapshot <snapshot.gti-or-directory> [-path-root local-root] [-listen 127.0.0.1:8080] [-token token]")
 	fmt.Println("  filesystem status -snapshot <snapshot-dir>")
+	fmt.Println("  filesystem inspect -snapshot <snapshot.gti-or-directory> [-view overview|children|largest|extensions|errors] [-directory-id N] [-kind all|files|directories] [-query name] [-min-bytes N] [-limit N] [-offset N]")
 	fmt.Println("  archive encode -path <file-or-directory> [-output path]")
 	fmt.Println("  archive decode -input <encoded-file> [-output path]")
 	fmt.Println("  document read -path <file.docx>")

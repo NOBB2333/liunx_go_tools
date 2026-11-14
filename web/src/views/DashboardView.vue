@@ -2,14 +2,14 @@
 import { ArrowUp, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, FolderOpen, Home } from 'lucide-vue-next'
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { copyText, formatBytes, formatCount, getChildren, getDirectory, getExtensions, getSummary, openItem } from '../api'
+import { copyText, formatBytes, formatCount, getChildren, getDirectory, getExtensions, getScanErrors, getSummary, openItem } from '../api'
 import EntryList from '../components/EntryList.vue'
 import PanelCard from '../components/PanelCard.vue'
 import PreviewDrawer from '../components/PreviewDrawer.vue'
 import SpaceMap from '../components/SpaceMap.vue'
 import StatCard from '../components/StatCard.vue'
 import { useUiPrefs } from '../composables/useUiPrefs'
-import type { DirectoryContext, ExtensionStat, Item, PageMeta, Summary } from '../types'
+import type { DirectoryContext, ExtensionStat, Item, PageMeta, ScanError, Summary } from '../types'
 
 const pageSize = 100
 // 右栏「当前目录最大文件」列多少个；后端一次多取一些再过滤出文件
@@ -35,12 +35,20 @@ const metric = ref<'allocated' | 'logical'>('logical')
 const copiedPath = ref(false)
 const openedPath = ref(false)
 const extensionsByCount = ref(false)
+const scanErrors = ref<ScanError[]>([])
+const scanErrorsOpen = ref(false)
+const scanErrorsLoading = ref(false)
+const scanErrorsMessage = ref('')
+const scanErrorsOffset = ref(0)
+const scanErrorsPageSize = 20
 
 // 空间图收起来之后，列表就吃满整张卡片。同一时刻整页头部和统计卡也让位，
 // 否则右栏面板一多仍会把整页撑高，又变回「页面滚动 + 列表内滚动」两层滚动条。
 const mapCollapsed = computed(() => isCollapsed('spacemap'))
 const filled = computed(() => mapCollapsed.value)
 const allocatedKnown = computed(() => summary.value?.manifest.allocated_bytes_known === true)
+const volume = computed(() => summary.value?.manifest.volume || summary.value?.local_volume)
+const volumeIsLocal = computed(() => !summary.value?.manifest.volume && !!summary.value?.local_volume)
 const directories = computed(() => children.value.filter(item => item.is_dir))
 
 function itemSize(item: Item): number {
@@ -118,6 +126,25 @@ async function loadDirectory(id: number, nextOffset = 0) {
   }
 }
 
+async function loadScanErrors(nextOffset = 0) {
+  scanErrorsLoading.value = true
+  scanErrorsMessage.value = ''
+  try {
+    const page = await getScanErrors(nextOffset, scanErrorsPageSize)
+    scanErrors.value = page.items
+    scanErrorsOffset.value = nextOffset
+  } catch (cause) {
+    scanErrorsMessage.value = cause instanceof Error ? cause.message : '无法读取扫描异常'
+  } finally {
+    scanErrorsLoading.value = false
+  }
+}
+
+function toggleScanErrors() {
+  scanErrorsOpen.value = !scanErrorsOpen.value
+  if (scanErrorsOpen.value && scanErrors.value.length === 0) loadScanErrors()
+}
+
 function showPreview(item: Item) {
   previewItem.value = item
 }
@@ -169,15 +196,52 @@ watch(() => [route.query.directory, route.query.offset], ([directoryQuery, offse
         <h1 class="mt-2 text-4xl font-semibold text-white">磁盘空间分析</h1>
         <p class="mt-2 break-all text-sm text-zinc-500">{{ summary.manifest.root }}</p>
       </div>
-      <span class="shrink-0 rounded border border-emerald-900 px-3 py-2 text-sm text-emerald-300">{{ summary.manifest.complete ? '扫描完成' : '扫描中' }}</span>
+      <span class="shrink-0 rounded border border-emerald-900 px-3 py-2 text-sm text-emerald-300">{{ summary.manifest.complete ? (summary.manifest.errors ? '扫描完成，有异常' : '扫描完成') : '扫描中' }}</span>
     </header>
 
     <section v-if="!filled" class="mb-5 grid grid-cols-2 gap-3 lg:grid-cols-5">
       <StatCard label="文件" :value="formatCount(summary.manifest.files)" />
       <StatCard label="目录" :value="formatCount(summary.manifest.directories)" />
-      <StatCard label="实际占用" :value="allocatedKnown ? formatBytes(summary.manifest.allocated_bytes) : '不可用'" />
+      <StatCard label="扫描范围内的文件分配空间" :value="allocatedKnown ? formatBytes(summary.manifest.allocated_bytes) : '不可用'" />
       <StatCard label="逻辑大小" :value="formatBytes(summary.manifest.logical_bytes)" />
       <StatCard label="扫描耗时" :value="`${(summary.manifest.duration_ns / 1e9).toFixed(1)} s`" />
+    </section>
+
+    <section v-if="!filled" class="mb-5 rounded-lg border border-zinc-800 bg-zinc-900 px-4 py-3 text-sm text-zinc-400">
+      <p>扫描范围：<span class="break-all text-zinc-200">{{ summary.manifest.root }}</span>。文件分配空间只汇总该范围内已读取的文件，不代表整块磁盘的已用空间。</p>
+      <div v-if="volume" class="mt-3 border-t border-zinc-800 pt-3">
+        <p class="text-zinc-300">{{ volumeIsLocal ? '当前查看器本机路径所在的文件系统' : '扫描结束时，扫描路径所在的文件系统' }} <span class="break-all text-xs text-zinc-500">{{ volume.path }}</span></p>
+        <p class="mt-1 flex flex-wrap gap-x-5 gap-y-1">
+          <span>总容量 <strong class="font-medium text-zinc-200">{{ formatBytes(volume.total_bytes) }}</strong></span>
+          <span>已用或保留 <strong class="font-medium text-zinc-200">{{ formatBytes(volume.used_bytes) }}</strong></span>
+          <span>可用 <strong class="font-medium text-zinc-200">{{ formatBytes(volume.available_bytes) }}</strong></span>
+        </p>
+        <p v-if="volumeIsLocal" class="mt-1 text-xs text-zinc-500">旧快照没有记录扫描时的容量；这里是查看器所在机器的当前值，快照复制到其他机器时可能不是同一磁盘。</p>
+      </div>
+      <p class="mt-2 text-xs leading-relaxed text-zinc-500">GB 按 1,000,000,000 字节计算。文件系统容量可能包含其他目录、共享容器或保留空间；扫描也可能跨文件系统。硬链接、APFS 克隆和快照等会使文件大小之和与磁盘空间不同。</p>
+    </section>
+
+    <section v-if="summary.manifest.errors > 0" class="mb-5 rounded-lg border border-amber-800/70 bg-amber-950/30 px-4 py-3 text-sm text-amber-200" aria-label="扫描异常">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <span>扫描时有 {{ formatCount(summary.manifest.errors) }} 处读取失败，部分文件可能未计入。</span>
+        <button class="rounded border border-amber-700 px-2 py-1 text-xs hover:bg-amber-900/50" :aria-expanded="scanErrorsOpen" @click="toggleScanErrors">{{ scanErrorsOpen ? '收起异常' : '查看异常路径' }}</button>
+      </div>
+      <div v-if="scanErrorsOpen" class="mt-3 border-t border-amber-900 pt-2 text-xs">
+        <p v-if="scanErrorsLoading">正在读取异常…</p>
+        <p v-else-if="scanErrorsMessage" class="text-rose-300">{{ scanErrorsMessage }}</p>
+        <p v-else-if="!scanErrors.length">没有可显示的异常记录。</p>
+        <ul v-else class="space-y-2">
+          <li v-for="(entry, index) in scanErrors" :key="`${scanErrorsOffset}-${index}`" class="break-all">
+            <div class="text-amber-100">{{ entry.path }}</div>
+            <div class="text-amber-300/70">{{ entry.error }}</div>
+          </li>
+        </ul>
+        <div v-if="summary.manifest.errors > scanErrorsPageSize" class="mt-3 flex items-center gap-2">
+          <button class="rounded border border-amber-800 px-2 py-1 disabled:opacity-40" :disabled="scanErrorsLoading || scanErrorsOffset === 0" @click="loadScanErrors(Math.max(0, scanErrorsOffset - scanErrorsPageSize))">上一页</button>
+          <span>{{ scanErrorsOffset + 1 }}–{{ Math.min(scanErrorsOffset + scanErrors.length, summary.manifest.errors) }} / {{ formatCount(summary.manifest.errors) }}</span>
+          <button class="rounded border border-amber-800 px-2 py-1 disabled:opacity-40" :disabled="scanErrorsLoading || scanErrorsOffset + scanErrorsPageSize >= summary.manifest.errors" @click="loadScanErrors(scanErrorsOffset + scanErrorsPageSize)">下一页</button>
+        </div>
+      </div>
     </section>
 
     <section class="grid gap-5 lg:grid-cols-[minmax(0,1.5fr)_minmax(340px,.8fr)]">
@@ -189,7 +253,7 @@ watch(() => [route.query.directory, route.query.offset], ([directoryQuery, offse
             <h2 class="font-semibold" :class="filled ? 'text-lg' : 'mt-2 text-xl'">目录浏览</h2>
           </div>
           <div class="flex shrink-0 items-center gap-2">
-            <span v-if="filled" class="rounded border px-2 py-1 text-xs" :class="summary.manifest.complete ? 'border-emerald-900 text-emerald-300' : 'border-amber-900 text-amber-300'">{{ summary.manifest.complete ? '扫描完成' : '扫描中' }}</span>
+            <span v-if="filled" class="rounded border px-2 py-1 text-xs" :class="summary.manifest.complete ? 'border-emerald-900 text-emerald-300' : 'border-amber-900 text-amber-300'">{{ summary.manifest.complete ? (summary.manifest.errors ? '扫描完成，有异常' : '扫描完成') : '扫描中' }}</span>
             <button
               class="flex items-center justify-center rounded bg-emerald-400 text-zinc-950 disabled:cursor-not-allowed disabled:opacity-40"
               :class="filled ? 'h-8 w-8' : 'h-9 w-9'"
@@ -323,7 +387,7 @@ watch(() => [route.query.directory, route.query.offset], ([directoryQuery, offse
           </div>
         </PanelCard>
 
-        <PanelCard id="extensions" eyebrow="EXTENSIONS" title="全盘类型占用" hint="整个快照的统计，与当前所在目录无关">
+        <PanelCard id="extensions" eyebrow="EXTENSIONS" title="快照类型占用" hint="整个快照的统计，与当前所在目录无关">
           <div class="mb-3 flex justify-end">
             <div class="flex rounded border border-zinc-700 p-0.5 text-xs" role="group" aria-label="类型占用排序方式">
               <button class="rounded px-2 py-1" :class="!extensionsByCount ? 'bg-emerald-400 text-zinc-950' : 'text-zinc-400 hover:text-white'" @click="extensionsByCount = false">按大小</button>
