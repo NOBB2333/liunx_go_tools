@@ -111,7 +111,7 @@ pnpm run build
 
 前端产物**不随源码提交**。`internal/filesystem/web/` 只提交一个 `keep.txt` 占位文件，让 `go:embed` 在未构建前端时成立，其余内容全部由构建脚本生成。构建前会先跑 `prebuild` 清理目录（保留占位文件），因为 Vite 的 `emptyOutDir` 会把占位文件一起删掉。
 
-这样一来：克隆后 `go build`、`go test` 都能过，但二进制里没有网页界面，访问会返回一页提示；要得到完整二进制，先跑 `./build.sh`、`.uild.ps1` 或 `make frontend`。
+这样一来：克隆后 `go build`、`go test` 都能过，但二进制里没有网页界面，访问会返回一页提示；要得到完整二进制，先跑 `./build.sh`、`.\build.ps1` 或 `make frontend`。
 
 产物是编译期嵌入的，所以**改完前端必须重新编译 Go 二进制**，只跑 `pnpm run build` 不会更新正在运行的二进制。
 

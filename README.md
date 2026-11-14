@@ -107,12 +107,12 @@ golangtools-windows-arm64.exe
 
 macOS 和 Linux 下载对应架构的 `.tar.gz`，Windows 下载对应架构的 `.zip`。解压后可直接在解压目录运行其中的 `golangtools-*` 可执行文件，压缩包同时包含 README 和文档。macOS 二进制使用临时签名以支持调试权限，不包含 Apple Developer ID 签名或公证。
 
-发布流程在 [Actions](https://github.com/NOBB2333/liunx_go_tools/actions) 中查看。全部任务成功后资源才会上传；若发布流程失败，可查看失败日志，修复问题后重新运行该工作流。
+发布流程在 [Actions](https://github.com/NOBB2333/liunx_go_tools/actions) 中查看。全部任务成功后资源才会上传。若遇到临时故障，可在 Actions 中重新运行失败任务；如果需要修改代码，请修复后发布新版本。
 
 **前端产物不随源码提交**。`internal/filesystem/web/` 里只提交一个 `keep.txt` 占位文件，让 `go:embed` 在未构建前端时也能成立，其余内容全部由构建脚本生成——它们体积大，而且每改一次界面就会整体重写。所以：
 
 - 克隆后直接 `go build` / `go test` 能过，但那时二进制里没有网页界面，访问会返回一页「这个二进制里没有网页界面」的提示。
-- 要得到完整可用的二进制，跑 `./build.sh`、`.uild.ps1` 或 `make frontend` 再编译。发布流程本来就是这么走的。
+- 要得到完整可用的二进制，跑 `./build.sh`、`.\build.ps1` 或 `make frontend` 再编译。发布流程本来就是这么走的。
 - `web/public/` 同理，是 Vite 插件在开发/构建时生成的预览器资源副本，已被忽略。
 
 ## 文件系统扫描
