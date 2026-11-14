@@ -52,11 +52,21 @@ func TestCleanupRunnerRun(t *testing.T) {
 		t.Fatalf("run cleanup: %v", err)
 	}
 
-	if report.TotalReclaimedBytes != 200 {
-		t.Fatalf("unexpected reclaimed bytes: %d", report.TotalReclaimedBytes)
-	}
 	if len(report.Items) != 3 {
 		t.Fatalf("expected 3 cleanup items, got %d", len(report.Items))
+	}
+	// Linux measures allocated disk blocks with du, while other platforms may
+	// report logical file sizes. Verify the accounting rather than assuming
+	// that three small files always reclaim exactly their 200 logical bytes.
+	var total int64
+	for _, item := range report.Items {
+		if item.BeforeBytes <= item.AfterBytes || item.ReclaimedBytes != item.BeforeBytes-item.AfterBytes {
+			t.Fatalf("unexpected cleanup accounting for %s: %+v", item.Key, item)
+		}
+		total += item.ReclaimedBytes
+	}
+	if report.TotalReclaimedBytes != total || total <= 0 {
+		t.Fatalf("unexpected reclaimed total: got %d, sum %d", report.TotalReclaimedBytes, total)
 	}
 
 	for _, dir := range []string{keepDir, goDir, pipDir} {
