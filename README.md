@@ -2,6 +2,72 @@
 
 `golangtools` 是一个模块化的跨平台系统工具集。文件系统模块使用原生目录读取、单文件 GTI 快照和本地只读 Web 服务，可以处理百万级目录树，而不生成巨型 CSV 或单文件 HTML。
 
+[下载最新版本](https://github.com/NOBB2333/liunx_go_tools/releases/latest) · [文件系统使用指南](docs/filesystem-user-guide.md) · [AI 查询指南](docs/ai-disk-analysis.md)
+
+## 功能一览
+
+- **磁盘空间分析**：扫描目录树，按实际分配空间或逻辑大小查看目录、文件和扩展名排行；读取失败的路径会单独列出。
+- **可交互的本地浏览器**：通过空间占用图、目录列表和文件名搜索定位内容，支持复制路径、在文件管理器中打开和常见格式预览。
+- **AI 与脚本查询**：`filesystem inspect` 直接读取快照并输出分页 JSON，按名称、目录或大小检索，不需要启动网页。
+- **单文件离线快照**：扫描结果保存在 `snapshot.gti`；可以复制到其他机器浏览，不包含原始文件内容。
+- **其他系统工具**：提供归档、文档提取、进程监控、网络扫描、清理分析、Mock 数据和健康检查等命令。
+
+## 界面截图
+
+以下截图来自真实界面，文件名和目录均使用单独生成的演示数据。
+
+**空间总览与目录占用**
+
+![磁盘空间总览与目录占用图](docs/assets/disk-overview.webp)
+
+**文件名搜索**
+
+![按文件名搜索快照中的文件](docs/assets/file-search.webp)
+
+**文件预览**
+
+![在目录浏览器中预览 Markdown 文件](docs/assets/file-preview.webp)
+
+## 下载与快速开始
+
+从 [GitHub Releases](https://github.com/NOBB2333/liunx_go_tools/releases/latest) 下载对应系统和架构的压缩包。macOS 与 Linux 使用 `.tar.gz`，Windows 使用 `.zip`；下载页同时提供 `SHA256SUMS`。
+
+| 电脑 | 压缩包名称中的平台标识 |
+| --- | --- |
+| Apple 芯片 Mac | `darwin-arm64` |
+| Intel 芯片 Mac | `darwin-amd64` |
+| Linux x86-64 / ARM64 | `linux-amd64` / `linux-arm64` |
+| Windows x86-64 / ARM64 | `windows-amd64` / `windows-arm64` |
+
+解压后，在压缩包目录运行以下命令。示例使用 Apple 芯片 Mac，其他系统请将 `BIN` 换成对应的可执行文件；扫描输出应放在被扫描目录之外。
+
+```bash
+BIN=./golangtools-darwin-arm64
+SNAPSHOT="$(mktemp -d "${TMPDIR:-/tmp}/golangtools-snapshot.XXXXXXXX")"
+
+"$BIN" filesystem scan -root "$HOME" -output "$SNAPSHOT" -metadata basic
+"$BIN" filesystem serve -snapshot "$SNAPSHOT/snapshot.gti" -listen 127.0.0.1:8080
+```
+
+浏览器访问 `http://127.0.0.1:8080/`。需要给 AI 或脚本分析时，可直接查询同一份快照：
+
+```bash
+"$BIN" filesystem inspect -snapshot "$SNAPSHOT/snapshot.gti"
+"$BIN" filesystem inspect -snapshot "$SNAPSHOT/snapshot.gti" \
+  -view largest -kind directories -query node_modules
+```
+
+Windows PowerShell 示例（将 `D:\Data` 改成要扫描的目录）：
+
+```powershell
+$BIN = ".\golangtools-windows-amd64.exe"
+$SNAPSHOT = Join-Path $env:TEMP ("golangtools-snapshot-" + [guid]::NewGuid())
+& $BIN filesystem scan -root "D:\Data" -output $SNAPSHOT -metadata basic
+& $BIN filesystem serve -snapshot (Join-Path $SNAPSHOT "snapshot.gti") -listen 127.0.0.1:8080
+```
+
+快照反映扫描时刻；扫描路径可能只是整个磁盘的一部分。缓存、硬链接、APFS 克隆和虚拟磁盘等情况会影响实际可释放空间，清理前应检查用途。更多使用方法见 [文件系统使用指南](docs/filesystem-user-guide.md)。
+
 ## 直接构建
 
 需要 Go 1.24+、pnpm 12+ 和 Node.js 20+。macOS/Linux 使用 `build.sh`；Windows 使用 `build.ps1` 或双击 `build.cmd`：
@@ -214,8 +280,6 @@ pnpm run build      # 生成到 internal/filesystem/web/
 网页预览由 `@file-viewer/vue3` 配合 `@file-viewer/preset-standard` 提供，`@file-viewer/vite-plugin` 负责装配 renderer 并把 Worker/WASM/字体复制到产物里。选 `preset-standard` 而不是 `preset-all`，是为了避开 CAD 运行时的 AGPL-3.0 依赖和带水印的旧版 PPT 运行时。
 
 如果不需要预览功能，移除 `web/src/components/FilePreview.vue`、`PreviewDrawer.vue`、`EntryList.vue` 里的眼睛按钮、`server.go` 的 `handleContent`、`vite.config.ts` 里的插件和 `package.json` 里对应的依赖即可；去掉后发行包会小约 21MB。
-
-网页预览由 `@file-viewer/vue3` 配合 `@file-viewer/preset-standard` 提供，`@file-viewer/vite-plugin` 负责装配 renderer 并把 Worker/WASM/字体复制到产物里。选 `preset-standard` 而不是 `preset-all`，是为了避开 CAD 运行时的 AGPL-3.0 依赖和带水印的旧版 PPT 运行时。如果不需要预览，移除 `web/src/components/FilePreview.vue`、`PreviewDrawer.vue`、`EntryList.vue` 里的眼睛按钮、`server.go` 的 `handleContent`、`vite.config.ts` 里的插件和对应依赖即可。
 
 ## 文档
 

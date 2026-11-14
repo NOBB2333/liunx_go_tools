@@ -57,6 +57,9 @@ for index in "${!targets[@]}"; do
   chmod 755 "$stage/$binary"
   cp "$root_dir/README.md" "$stage/README.md"
   cp "$root_dir"/docs/*.md "$stage/docs/"
+  if [[ -d "$root_dir/docs/assets" ]]; then
+    cp -R "$root_dir/docs/assets" "$stage/docs/assets"
+  fi
   if [[ "$target" == windows-* ]]; then
     (cd "$stage" && zip -qr "$output_dir/${archives[$index]}" .)
   else
